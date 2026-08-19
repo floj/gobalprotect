@@ -3,11 +3,13 @@ package gpst
 import (
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -47,14 +49,29 @@ type AuthCookie struct {
 	RawCookie string
 }
 
+// InputCallback is called when the server requires interactive input (e.g. OTP).
+// prompt is the message to show the user.
+type InputCallback func(prompt string) (string, error)
+
+// ErrChallenge is returned internally when login gets a challenge response.
+var ErrChallenge = errors.New("challenge")
+
+// challenge holds parsed challenge data from a JavaScript response.
+type challenge struct {
+	Status   string
+	Message  string
+	InputStr string
+}
+
 // Client handles GlobalProtect protocol operations.
 type Client struct {
-	Server     string
-	Username   string
-	Password   string
-	UserAgent  string
-	HTTPClient *http.Client
-	Logger     *slog.Logger
+	Server        string
+	Username      string
+	Password      string
+	UserAgent     string
+	HTTPClient    *http.Client
+	Logger        *slog.Logger
+	InputCallback InputCallback
 }
 
 // NewClient creates a new GlobalProtect client.
@@ -170,7 +187,81 @@ func (c *Client) Login() (*AuthCookie, error) {
 		return nil, fmt.Errorf("login returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	return parseLoginResponse(body)
+	cookie, ch, err := parseLoginOrChallenge(body)
+	if err != nil {
+		return nil, err
+	}
+	if ch != nil {
+		return c.handleChallenge(ch)
+	}
+	return cookie, nil
+}
+
+// handleChallenge processes an OTP/MFA challenge from the server.
+func (c *Client) handleChallenge(ch *challenge) (*AuthCookie, error) {
+	if c.InputCallback == nil {
+		return nil, fmt.Errorf("server requires OTP challenge but no input callback configured: %s", ch.Message)
+	}
+
+	c.Logger.Info("OTP challenge received", "message", ch.Message)
+
+	otp, err := c.InputCallback(ch.Message)
+	if err != nil {
+		return nil, fmt.Errorf("reading OTP input: %w", err)
+	}
+
+	// Resubmit login with the OTP and inputStr
+	loginURL := fmt.Sprintf("https://%s/ssl-vpn/login.esp", c.Server)
+
+	form := url.Values{}
+	form.Set("jnlpReady", "jnlpReady")
+	form.Set("ok", "Login")
+	form.Set("direct", "yes")
+	form.Set("clientVer", "4100")
+	form.Set("prot", "https:")
+	form.Set("ipv6-support", "yes")
+	form.Set("clientos", "Linux")
+	form.Set("os-version", "linux")
+	form.Set("server", c.Server)
+	form.Set("computer", hostname())
+	form.Set("user", c.Username)
+	form.Set("passwd", otp)
+	form.Set("inputStr", ch.InputStr)
+
+	c.Logger.Debug("sending OTP challenge response", "url", loginURL)
+
+	req, err := http.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating challenge login request: %w", err)
+	}
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("challenge login request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading challenge login response: %w", err)
+	}
+
+	c.Logger.Debug("challenge login response", "status", resp.StatusCode, "body", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("challenge login returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	cookie, ch2, err := parseLoginOrChallenge(body)
+	if err != nil {
+		return nil, err
+	}
+	if ch2 != nil {
+		return nil, fmt.Errorf("server sent another challenge after OTP submission: %s", ch2.Message)
+	}
+	return cookie, nil
 }
 
 // LoginWithCookie performs login using a pre-existing cookie/token (e.g. from SAML).
@@ -215,12 +306,29 @@ func (c *Client) LoginWithCookie(cookieName, cookieValue string) (*AuthCookie, e
 		return nil, fmt.Errorf("login returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	return parseLoginResponse(body)
+	cookie, ch, err := parseLoginOrChallenge(body)
+	if err != nil {
+		return nil, err
+	}
+	if ch != nil {
+		return c.handleChallenge(ch)
+	}
+	return cookie, nil
 }
 
-// parseLoginResponse parses the JNLP XML response from login.esp.
-// The arguments are positional and map to specific fields.
-func parseLoginResponse(body []byte) (*AuthCookie, error) {
+// parseLoginOrChallenge tries to parse the login response as JNLP XML.
+// If it's a JavaScript challenge, it returns (nil, challenge, nil).
+// If it's a successful login, it returns (cookie, nil, nil).
+func parseLoginOrChallenge(body []byte) (*AuthCookie, *challenge, error) {
+	// First check if this is a JavaScript challenge response
+	if ch, ok := parseJavaScriptChallenge(body); ok {
+		if ch.Status == "Challenge" {
+			return nil, ch, nil
+		}
+		// Status is "Error"
+		return nil, nil, fmt.Errorf("login error from server: %s", ch.Message)
+	}
+
 	var loginResp LoginResponse
 	if err := xml.Unmarshal(body, &loginResp); err != nil {
 		// Check if this is an error response
@@ -230,9 +338,9 @@ func parseLoginResponse(body []byte) (*AuthCookie, error) {
 			Error   string   `xml:"error"`
 		}
 		if err2 := xml.Unmarshal(body, &errResp); err2 == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("login failed: %s", errResp.Error)
+			return nil, nil, fmt.Errorf("login failed: %s", errResp.Error)
 		}
-		return nil, fmt.Errorf("parsing login response: %w (body: %s)", err, string(body))
+		return nil, nil, fmt.Errorf("parsing login response: %w (body: %s)", err, string(body))
 	}
 
 	args := loginResp.AppDesc.Arguments
@@ -273,7 +381,7 @@ func parseLoginResponse(body []byte) (*AuthCookie, error) {
 	cookie.Computer = hostname()
 
 	if cookie.AuthCookie == "" {
-		return nil, fmt.Errorf("no authcookie in login response")
+		return nil, nil, fmt.Errorf("no authcookie in login response")
 	}
 
 	// Build raw cookie string for subsequent requests
@@ -291,7 +399,7 @@ func parseLoginResponse(body []byte) (*AuthCookie, error) {
 	addPart("computer", cookie.Computer)
 	cookie.RawCookie = strings.Join(parts, "&")
 
-	return cookie, nil
+	return cookie, nil, nil
 }
 
 // Logout sends a logout request to invalidate the session.
@@ -332,4 +440,40 @@ func hostname() string {
 // Separated for testability
 var hostnameFn = func() (string, error) {
 	return osHostname()
+}
+
+// JavaScript challenge response format:
+//
+//	var respStatus = "Challenge";
+//	var respMsg = "OTP delivered to: OTP App. Please enter the value";
+//	thisForm.inputStr.value = "6a06d76f00a8f25d";
+var (
+	reRespStatus = regexp.MustCompile(`var\s+respStatus\s*=\s*"([^"]*)"`)
+	reRespMsg    = regexp.MustCompile(`var\s+respMsg\s*=\s*"([^"]*)"`)
+	reInputStr   = regexp.MustCompile(`thisForm\.inputStr\.value\s*=\s*"([^"]*)"`)
+)
+
+// parseJavaScriptChallenge attempts to parse a JavaScript challenge response.
+// Returns the challenge data and true if it was a JS challenge, or nil and false otherwise.
+func parseJavaScriptChallenge(body []byte) (*challenge, bool) {
+	s := string(body)
+
+	statusMatch := reRespStatus.FindStringSubmatch(s)
+	if statusMatch == nil {
+		return nil, false
+	}
+
+	ch := &challenge{
+		Status: statusMatch[1],
+	}
+
+	if msgMatch := reRespMsg.FindStringSubmatch(s); msgMatch != nil {
+		ch.Message = msgMatch[1]
+	}
+
+	if inputMatch := reInputStr.FindStringSubmatch(s); inputMatch != nil {
+		ch.InputStr = inputMatch[1]
+	}
+
+	return ch, true
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -100,6 +101,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
+	client.InputCallback = func(prompt string) (string, error) {
+		fmt.Fprintf(os.Stderr, "%s: ", prompt)
+		scanner := bufio.NewScanner(os.Stdin)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("no input provided")
+		}
+		return strings.TrimSpace(scanner.Text()), nil
+	}
 
 	// Authenticate
 	logger.Info("authenticating", "server", cfg.server, "user", cfg.username)
