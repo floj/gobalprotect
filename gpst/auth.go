@@ -454,12 +454,21 @@ func parseJavaScriptChallenge(body []byte) (*challenge, bool) {
 		return nil, false
 	}
 
+	// Extract JS from HTML body tags if present
+	script := s
+	if idx := strings.Index(s, "<body>"); idx >= 0 {
+		script = s[idx+len("<body>"):]
+		if end := strings.Index(script, "</body>"); end >= 0 {
+			script = script[:end]
+		}
+	}
+
 	vm := goja.New()
 
 	// Provide the thisForm.inputStr stub that the script writes to
 	_, _ = vm.RunString(`var thisForm = { inputStr: {} };`)
 
-	if _, err := vm.RunString(s); err != nil {
+	if _, err := vm.RunString(script); err != nil {
 		return nil, false
 	}
 
