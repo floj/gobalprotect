@@ -9,8 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
+
+	"github.com/dop251/goja"
 )
 
 // PreloginResponse represents the server's prelogin response.
@@ -442,38 +443,56 @@ var hostnameFn = func() (string, error) {
 	return osHostname()
 }
 
-// JavaScript challenge response format:
-//
-//	var respStatus = "Challenge";
-//	var respMsg = "OTP delivered to: OTP App. Please enter the value";
-//	thisForm.inputStr.value = "6a06d76f00a8f25d";
-var (
-	reRespStatus = regexp.MustCompile(`var\s+respStatus\s*=\s*"([^"]*)"`)
-	reRespMsg    = regexp.MustCompile(`var\s+respMsg\s*=\s*"([^"]*)"`)
-	reInputStr   = regexp.MustCompile(`thisForm\.inputStr\.value\s*=\s*"([^"]*)"`)
-)
-
-// parseJavaScriptChallenge attempts to parse a JavaScript challenge response.
+// parseJavaScriptChallenge attempts to parse a JavaScript challenge response
+// by executing it in a sandboxed JS interpreter.
 // Returns the challenge data and true if it was a JS challenge, or nil and false otherwise.
 func parseJavaScriptChallenge(body []byte) (*challenge, bool) {
 	s := string(body)
 
-	statusMatch := reRespStatus.FindStringSubmatch(s)
-	if statusMatch == nil {
+	// Quick check: does this look like a JS challenge at all?
+	if !strings.Contains(s, "respStatus") {
 		return nil, false
 	}
 
-	ch := &challenge{
-		Status: statusMatch[1],
+	vm := goja.New()
+
+	// Provide the thisForm.inputStr stub that the script writes to
+	_, _ = vm.RunString(`var thisForm = { inputStr: {} };`)
+
+	if _, err := vm.RunString(s); err != nil {
+		return nil, false
 	}
 
-	if msgMatch := reRespMsg.FindStringSubmatch(s); msgMatch != nil {
-		ch.Message = msgMatch[1]
+	getString := func(name string) string {
+		v := vm.Get(name)
+		if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+			return ""
+		}
+		return v.String()
 	}
 
-	if inputMatch := reInputStr.FindStringSubmatch(s); inputMatch != nil {
-		ch.InputStr = inputMatch[1]
+	status := getString("respStatus")
+	if status == "" {
+		return nil, false
 	}
 
-	return ch, true
+	// Extract inputStr from thisForm.inputStr.value
+	inputStr := ""
+	if tf := vm.Get("thisForm"); tf != nil && !goja.IsUndefined(tf) {
+		if obj := tf.ToObject(vm); obj != nil {
+			if is := obj.Get("inputStr"); is != nil && !goja.IsUndefined(is) {
+				if isObj := is.ToObject(vm); isObj != nil {
+					if val := isObj.Get("value"); val != nil && !goja.IsUndefined(val) {
+						inputStr = val.String()
+					}
+				}
+			}
+		}
+	}
+
+	return &challenge{
+		Status:   status,
+		Message:  getString("respMsg"),
+		InputStr: inputStr,
+	}, true
 }
