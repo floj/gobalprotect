@@ -19,12 +19,13 @@ type Device struct {
 
 // Config holds the TUN device configuration.
 type Config struct {
-	Name    string // e.g. "gpd0"; empty for auto
-	Address string // e.g. "10.0.0.1"
-	Netmask string // e.g. "255.255.255.255"
-	MTU     int
-	DNS     []string
-	Routes  []string // CIDR routes to add, e.g. "10.0.0.0/8"
+	Name       string // e.g. "gpd0"; empty for auto
+	Address    string // e.g. "10.0.0.1"
+	Netmask    string // e.g. "255.255.255.255"
+	MTU        int
+	DNS        []string
+	Routes     []string // CIDR routes to add, e.g. "10.0.0.0/8"
+	ExcludeIPs []string // IPs to route via existing default gateway (e.g. VPN server)
 }
 
 // New creates and configures a new TUN device.
@@ -103,6 +104,26 @@ func (d *Device) configure(cfg Config) error {
 	}
 
 	d.logger.Info("TUN device configured", "address", cfg.Address, "mtu", mtu)
+
+	// Add host routes for excluded IPs (e.g. VPN server) via existing default gateway
+	// to prevent routing loops when split routes cover the VPN server's IP.
+	if len(cfg.ExcludeIPs) > 0 {
+		if gw := detectDefaultGateway(); gw != "" {
+			for _, ip := range cfg.ExcludeIPs {
+				ip = strings.TrimSpace(ip)
+				if ip == "" {
+					continue
+				}
+				if err := run("ip", "route", "add", ip+"/32", "via", gw); err != nil {
+					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw, "error", err)
+				} else {
+					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw)
+				}
+			}
+		} else {
+			d.logger.Warn("could not detect default gateway; VPN server route exclusion skipped")
+		}
+	}
 
 	// Add routes
 	for _, route := range cfg.Routes {
@@ -204,4 +225,20 @@ func run(name string, args ...string) error {
 		return fmt.Errorf("%s %s: %s: %w", name, strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// detectDefaultGateway returns the current default gateway IP, or "" if not found.
+func detectDefaultGateway() string {
+	out, err := exec.Command("ip", "route", "show", "default").Output()
+	if err != nil {
+		return ""
+	}
+	// Parse "default via X.X.X.X dev ethN ..."
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	for i, p := range parts {
+		if p == "via" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }

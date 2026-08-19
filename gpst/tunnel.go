@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,7 +45,7 @@ func (t *Tunnel) Connect(ctx context.Context) error {
 	params.Set("user", t.cookie.User)
 	params.Set("authcookie", t.cookie.AuthCookie)
 
-	tunnelPath := "ssl-vpn/tunnel.esp"
+	tunnelPath := strings.TrimPrefix(t.config.TunnelURL, "/")
 
 	reqLine := fmt.Sprintf("GET /%s?%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n\r\n",
 		tunnelPath, params.Encode(), t.client.Server, t.client.UserAgent)

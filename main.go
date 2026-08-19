@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -155,6 +156,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		MTU:     vpnConfig.MTU,
 	}
 
+	// Resolve VPN server IPs so we can exclude them from split routes
+	serverIPs := resolveServerIPs(cfg.server, logger)
+	tunCfg.ExcludeIPs = serverIPs
+
 	if !cfg.noRoutes {
 		tunCfg.Routes = vpnConfig.SplitIncludes
 	}
@@ -207,4 +212,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	}
 
 	return err
+}
+
+// resolveServerIPs resolves the VPN server hostname to IP addresses.
+func resolveServerIPs(server string, logger *slog.Logger) []string {
+	host := server
+	if h, _, err := net.SplitHostPort(server); err == nil {
+		host = h
+	}
+
+	// If it's already an IP, return it directly
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{ip.String()}
+	}
+
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		logger.Warn("could not resolve VPN server hostname", "host", host, "error", err)
+		return nil
+	}
+
+	logger.Debug("resolved VPN server IPs", "host", host, "ips", addrs)
+	return addrs
 }
