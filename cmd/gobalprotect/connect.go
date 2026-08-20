@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
@@ -14,8 +13,8 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
+	"github.com/manifoldco/promptui"
 	cli "github.com/urfave/cli/v3"
-	"golang.org/x/term"
 
 	"github.com/floj/gobalprotect/pkg/gpst"
 	"github.com/floj/gobalprotect/pkg/tun"
@@ -181,24 +180,31 @@ func connectCommand() *cli.Command {
 
 			if cookieName == "" || cookieValue == "" {
 				if username == "" {
-					fmt.Fprint(os.Stderr, "Username: ")
-					scanner := bufio.NewScanner(os.Stdin)
-					if scanner.Scan() {
-						username = strings.TrimSpace(scanner.Text())
+					prompt := promptui.Prompt{
+						Label:  "Username",
+						Stdout: os.Stderr,
 					}
+					result, err := prompt.Run()
+					if err != nil {
+						return fmt.Errorf("username prompt failed: %w", err)
+					}
+					username = result
 					if username == "" {
 						return fmt.Errorf("either --username/--password or --cookie-name/--cookie-value is required")
 					}
 				}
 
 				if password == "" {
-					fmt.Fprint(os.Stderr, "Password: ")
-					pwBytes, err := term.ReadPassword(int(syscall.Stdin))
-					fmt.Fprintln(os.Stderr)
-					if err != nil {
-						return fmt.Errorf("reading password: %w", err)
+					prompt := promptui.Prompt{
+						Label:  "Password",
+						Mask:   '*',
+						Stdout: os.Stderr,
 					}
-					password = string(pwBytes)
+					result, err := prompt.Run()
+					if err != nil {
+						return fmt.Errorf("password prompt failed: %w", err)
+					}
+					password = result
 				}
 			}
 
@@ -447,21 +453,19 @@ func otpInputCallback(logger *slog.Logger, otp string, used *bool) func(string) 
 
 func interactiveInputCallback(ctx context.Context) func(string) (string, error) {
 	return func(prompt string) (string, error) {
-		fmt.Fprintf(os.Stderr, "%s: ", prompt)
-
 		resultCh := make(chan string, 1)
 		errCh := make(chan error, 1)
 		go func() {
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
-				if err := scanner.Err(); err != nil {
-					errCh <- err
-				} else {
-					errCh <- fmt.Errorf("no input provided")
-				}
+			p := promptui.Prompt{
+				Label:  prompt,
+				Stdout: os.Stderr,
+			}
+			result, err := p.Run()
+			if err != nil {
+				errCh <- err
 				return
 			}
-			resultCh <- strings.TrimSpace(scanner.Text())
+			resultCh <- result
 		}()
 
 		select {
