@@ -81,7 +81,7 @@ type Client struct {
 func NewClient(server, username, password, computer string, insecure bool, logger *slog.Logger) *Client {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: insecure, //nolint:gosec // User-controlled option for self-signed certs
+			InsecureSkipVerify: insecure, // User-controlled option for self-signed certs
 		},
 	}
 	return &Client{

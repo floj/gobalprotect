@@ -246,13 +246,13 @@ func (d *Device) configureDNS(servers []string) {
 		return
 	}
 
-	input := ""
+	var input strings.Builder
 	for _, s := range servers {
-		input += "nameserver " + s + "\n"
+		input.WriteString("nameserver " + s + "\n")
 	}
 
 	cmd := exec.Command(resolvconf, "-a", d.name, "-m", "0", "-x")
-	cmd.Stdin = strings.NewReader(input)
+	cmd.Stdin = strings.NewReader(input.String())
 	if err := cmd.Run(); err != nil {
 		d.logger.Warn("resolvconf failed", "error", err)
 		return
@@ -266,7 +266,7 @@ func (d *Device) RemoveDNS() {
 	if err != nil {
 		return
 	}
-	exec.Command(resolvconf, "-d", d.name).Run() //nolint:errcheck
+	exec.Command(resolvconf, "-d", d.name).Run()
 }
 
 // AddDefaultRoute adds a default route through the TUN device,

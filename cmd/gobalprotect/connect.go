@@ -327,26 +327,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {
 		otpUsed := false
-		client.InputCallback = func(prompt string) (string, error) {
-			if otpUsed {
-				return "", fmt.Errorf("OTP already used, but server requested another challenge: %s", prompt)
-			}
-			otpUsed = true
-			logger.Info("using OTP from command line", "prompt", prompt, "otp", cfg.otp)
-			return cfg.otp, nil
-		}
+		client.InputCallback = otpInputCallback(logger, cfg.otp, &otpUsed)
 	} else {
-		client.InputCallback = func(prompt string) (string, error) {
-			fmt.Fprintf(os.Stderr, "%s: ", prompt)
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
-				if err := scanner.Err(); err != nil {
-					return "", err
-				}
-				return "", fmt.Errorf("no input provided")
-			}
-			return strings.TrimSpace(scanner.Text()), nil
-		}
+		client.InputCallback = interactiveInputCallback(ctx)
 	}
 
 	// Authenticate
@@ -449,6 +432,47 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	}
 
 	return err
+}
+
+func otpInputCallback(logger *slog.Logger, otp string, used *bool) func(string) (string, error) {
+	return func(prompt string) (string, error) {
+		if *used {
+			return "", fmt.Errorf("OTP already used, but server requested another challenge: %s", prompt)
+		}
+		*used = true
+		logger.Info("using OTP from command line", "prompt", prompt, "otp", otp)
+		return otp, nil
+	}
+}
+
+func interactiveInputCallback(ctx context.Context) func(string) (string, error) {
+	return func(prompt string) (string, error) {
+		fmt.Fprintf(os.Stderr, "%s: ", prompt)
+
+		resultCh := make(chan string, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					errCh <- err
+				} else {
+					errCh <- fmt.Errorf("no input provided")
+				}
+				return
+			}
+			resultCh <- strings.TrimSpace(scanner.Text())
+		}()
+
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case err := <-errCh:
+			return "", err
+		case result := <-resultCh:
+			return result, nil
+		}
+	}
 }
 
 // resolveServerIPs resolves the VPN server hostname to IP addresses.

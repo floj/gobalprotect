@@ -85,7 +85,7 @@ func (t *Tunnel) Connect(ctx context.Context) error {
 		ServerName: hostFromAddr(t.client.Server),
 	}
 	if tr, ok := t.client.HTTPClient.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
-		tlsCfg.InsecureSkipVerify = tr.TLSClientConfig.InsecureSkipVerify //nolint:gosec
+		tlsCfg.InsecureSkipVerify = tr.TLSClientConfig.InsecureSkipVerify
 	}
 
 	tlsConn := tls.Client(rawConn, tlsCfg)
