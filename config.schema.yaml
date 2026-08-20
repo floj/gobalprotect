@@ -50,6 +50,9 @@ properties:
           type: boolean
           description: Don't configure DNS from server config.
           default: false
+        otp_cmd:
+          type: string
+          description: Shell command to execute to obtain OTP (stdout is used, 10s timeout).
         computer:
           type: string
           description: Computer name to report to the gateway.

@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	cli "github.com/urfave/cli/v3"
@@ -108,6 +110,11 @@ func connectCommand() *cli.Command {
 				Sources: cli.EnvVars("GP_OTP"),
 			},
 			&cli.StringFlag{
+				Name:    "otp-cmd",
+				Usage:   "Shell command to execute to obtain OTP (stdout is used as OTP, 10s timeout)",
+				Sources: cli.EnvVars("GP_OTP_CMD"),
+			},
+			&cli.StringFlag{
 				Name:    "computer",
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
@@ -179,6 +186,7 @@ func connectCommand() *cli.Command {
 				noRoutes:       cmd.Bool("no-routes") || fileCfg.NoRoutes,
 				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
 				otp:            coalesce(cmd.String("otp"), fileCfg.OTP),
+				otpCmd:         coalesce(cmd.String("otp-cmd"), fileCfg.OTPCmd),
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
 			})
 		},
@@ -197,6 +205,7 @@ type runConfig struct {
 	noRoutes       bool
 	noDNS          bool
 	otp            string
+	otpCmd         string
 	computer       string
 }
 
@@ -218,6 +227,7 @@ type tunnelConfig struct {
 	NoRoutes       bool   `yaml:"no_routes"`
 	NoDNS          bool   `yaml:"no_dns"`
 	OTP            string `yaml:"otp"`
+	OTPCmd         string `yaml:"otp_cmd"`
 	Computer       string `yaml:"computer"`
 }
 
@@ -272,7 +282,29 @@ func coalesce(values ...string) string {
 	return ""
 }
 
+func runOTPCmd(ctx context.Context, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
+	// Resolve OTP from command if otp-cmd is set and otp is not already provided
+	if cfg.otp == "" && cfg.otpCmd != "" {
+		otp, err := runOTPCmd(ctx, cfg.otpCmd)
+		if err != nil {
+			return fmt.Errorf("otp-cmd failed: %w", err)
+		}
+		cfg.otp = otp
+		logger.Debug("obtained OTP from command", "cmd", cfg.otpCmd)
+	}
+
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {
