@@ -69,6 +69,11 @@ func connectCommand() *cli.Command {
 				Sources: cli.EnvVars("GP_VERBOSE"),
 			},
 			&cli.BoolFlag{
+				Name:    "log-json",
+				Usage:   "Output logs in JSON format",
+				Sources: cli.EnvVars("GP_LOG_JSON"),
+			},
+			&cli.BoolFlag{
 				Name:    "no-routes",
 				Usage:   "Don't add split-tunnel routes from server config",
 				Sources: cli.EnvVars("GP_NO_ROUTES"),
@@ -94,7 +99,13 @@ func connectCommand() *cli.Command {
 			if cmd.Bool("verbose") {
 				logLevel = slog.LevelDebug
 			}
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+			var handler slog.Handler
+			if cmd.Bool("log-json") {
+				handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+			} else {
+				handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+			}
+			logger := slog.New(handler)
 
 			ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
