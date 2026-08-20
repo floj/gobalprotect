@@ -149,51 +149,80 @@ func (d *Device) configure(cfg Config) error {
 
 	// Add host routes for excluded IPs (e.g. VPN server) via existing default gateway
 	if len(cfg.ExcludeIPs) > 0 {
-		if gw := detectDefaultGateway(conn); gw != nil {
-			for _, ip := range cfg.ExcludeIPs {
-				ip = strings.TrimSpace(ip)
-				if ip == "" {
+		gw4, _ := detectDefaultGateway(conn, unix.AF_INET)
+		gw6, gw6Iface := detectDefaultGateway(conn, unix.AF_INET6)
+		for _, ip := range cfg.ExcludeIPs {
+			ip = strings.TrimSpace(ip)
+			if ip == "" {
+				continue
+			}
+			dst := net.ParseIP(ip)
+			if dst == nil {
+				d.logger.Warn("invalid exclude IP, skipping", "ip", ip)
+				continue
+			}
+			if dst4 := dst.To4(); dst4 != nil {
+				if gw4 == nil {
+					d.logger.Warn("no IPv4 default gateway; skipping exclude IP", "ip", ip)
 					continue
 				}
-				dst := net.ParseIP(ip).To4()
-				if dst == nil {
-					d.logger.Warn("invalid exclude IP, skipping", "ip", ip)
-					continue
-				}
-				if err := addRoute(conn, dst, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst, Gateway: gw}); err != nil {
-					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw, "error", err)
+				if err := addRoute(conn, unix.AF_INET, dst4, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst4, Gateway: gw4}); err != nil {
+					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw4, "error", err)
 				} else {
-					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw)
+					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw4)
+				}
+			} else {
+				dst = dst.To16()
+				if gw6 == nil {
+					d.logger.Warn("no IPv6 default gateway; skipping exclude IP", "ip", ip)
+					continue
+				}
+				if err := addRoute(conn, unix.AF_INET6, dst, 128, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst, Gateway: gw6, OutIface: gw6Iface}); err != nil {
+					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw6, "error", err)
+				} else {
+					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw6)
 				}
 			}
-		} else {
-			d.logger.Warn("could not detect default gateway; VPN server route exclusion skipped")
 		}
 	}
 
 	// Add routes
 	for _, route := range cfg.Routes {
 		route = strings.TrimSpace(route)
-		if route == "" || route == "0.0.0.0/0" {
+		if route == "" || route == "0.0.0.0/0" || route == "::/0" {
 			continue
 		}
 		var dst net.IP
 		var prefixLen uint8
+		var family uint8
 		_, cidr, err := net.ParseCIDR(route)
 		if err != nil {
-			ip := net.ParseIP(route).To4()
+			ip := net.ParseIP(route)
 			if ip == nil {
 				d.logger.Warn("invalid route, skipping", "route", route, "error", err)
 				continue
 			}
-			dst = ip
-			prefixLen = 32
+			if ip4 := ip.To4(); ip4 != nil {
+				dst = ip4
+				prefixLen = 32
+				family = unix.AF_INET
+			} else {
+				dst = ip.To16()
+				prefixLen = 128
+				family = unix.AF_INET6
+			}
 		} else {
-			dst = cidr.IP.To4()
 			ones, _ := cidr.Mask.Size()
 			prefixLen = uint8(ones)
+			if ip4 := cidr.IP.To4(); ip4 != nil {
+				dst = ip4
+				family = unix.AF_INET
+			} else {
+				dst = cidr.IP.To16()
+				family = unix.AF_INET6
+			}
 		}
-		if err := addRoute(conn, dst, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
+		if err := addRoute(conn, family, dst, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
 			d.logger.Warn("failed to add route", "route", route, "error", err)
 		} else {
 			d.logger.Info("added route", "route", route)
@@ -255,10 +284,10 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 	}
 
 	// Find current default gateway and add host route to VPN server through it
-	if gw := detectDefaultGateway(conn); gw != nil {
+	if gw, _ := detectDefaultGateway(conn, unix.AF_INET); gw != nil {
 		serverIP := net.ParseIP(gatewayIP).To4()
 		if serverIP != nil {
-			if err := addRoute(conn, serverIP, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: serverIP, Gateway: gw}); err != nil {
+			if err := addRoute(conn, unix.AF_INET, serverIP, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: serverIP, Gateway: gw}); err != nil {
 				d.logger.Warn("failed to add host route to VPN server", "error", err)
 			}
 		}
@@ -288,32 +317,41 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 }
 
 // addRoute adds a route with the given destination prefix, scope, and attributes.
-func addRoute(conn *rtnetlink.Conn, dst net.IP, prefixLen uint8, scope uint8, attrs rtnetlink.RouteAttributes) error {
-	return conn.Route.Add(&rtnetlink.RouteMessage{
-		Family:     unix.AF_INET,
+// If the route already exists, it tries to replace it.
+func addRoute(conn *rtnetlink.Conn, family uint8, dst net.IP, prefixLen uint8, scope uint8, attrs rtnetlink.RouteAttributes) error {
+	msg := &rtnetlink.RouteMessage{
+		Family:     family,
 		DstLength:  prefixLen,
 		Table:      unix.RT_TABLE_MAIN,
 		Protocol:   unix.RTPROT_STATIC,
 		Scope:      scope,
 		Type:       unix.RTN_UNICAST,
 		Attributes: attrs,
-	})
+	}
+	if err := conn.Route.Add(msg); err != nil {
+		if err2 := conn.Route.Replace(msg); err2 != nil {
+			return err2
+		}
+	}
+	return nil
 }
 
-// detectDefaultGateway returns the current default gateway IP, or nil if not found.
-func detectDefaultGateway(conn *rtnetlink.Conn) net.IP {
+// detectDefaultGateway returns the current default gateway IP and outgoing
+// interface index for the given address family (unix.AF_INET or unix.AF_INET6),
+// or nil/0 if not found.
+func detectDefaultGateway(conn *rtnetlink.Conn, family uint8) (net.IP, uint32) {
 	routes, err := conn.Route.List()
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	for _, r := range routes {
-		if r.Family != unix.AF_INET {
+		if r.Family != family {
 			continue
 		}
 		// Default route: DstLength == 0 and has a gateway
 		if r.DstLength == 0 && r.Attributes.Gateway != nil {
-			return r.Attributes.Gateway.To4()
+			return r.Attributes.Gateway, r.Attributes.OutIface
 		}
 	}
-	return nil
+	return nil, 0
 }
