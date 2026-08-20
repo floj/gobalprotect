@@ -249,7 +249,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	go func() {
 		<-ctx.Done()
-		logger.Info("context canceled, closing tunnel")
+		logger.Info("closing tunnel and shutting down gracefully")
 	}()
 
 	// Run the data loop
