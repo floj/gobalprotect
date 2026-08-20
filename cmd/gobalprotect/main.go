@@ -14,9 +14,8 @@ var (
 
 func main() {
 	cmd := &cli.Command{
-		Name:           "gobalprotect",
-		Usage:          "GlobalProtect VPN client using TUN device",
-		DefaultCommand: "connect",
+		Name:  "gobalprotect",
+		Usage: "GlobalProtect VPN client using TUN device",
 		Commands: []*cli.Command{
 			connectCommand(),
 			versionCommand(),
