@@ -11,8 +11,17 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// TunnelStats holds traffic statistics for the tunnel.
+type TunnelStats struct {
+	BytesSent     atomic.Int64
+	BytesReceived atomic.Int64
+	PacketsSent   atomic.Int64
+	PacketsRecv   atomic.Int64
+}
 
 // Tunnel manages the SSL VPN tunnel connection.
 type Tunnel struct {
@@ -21,6 +30,9 @@ type Tunnel struct {
 	config *VPNConfig
 	conn   net.Conn
 	logger *slog.Logger
+
+	Stats        TunnelStats
+	DisableStats bool
 
 	mu     sync.Mutex
 	closed bool
@@ -183,6 +195,29 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		}
 	}()
 
+	// Stats loop
+	if !t.DisableStats {
+		go func() {
+			ticker := time.NewTicker(1 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					t.logger.Info("tunnel stats",
+						"sent_bytes", t.Stats.BytesSent.Load(),
+						"recv_bytes", t.Stats.BytesReceived.Load(),
+						"sent_packets", t.Stats.PacketsSent.Load(),
+						"recv_packets", t.Stats.PacketsRecv.Load(),
+						"connections_open", 1,
+						"connections_total", 1,
+					)
+				}
+			}
+		}()
+	}
+
 	// Wait for first error
 	err := <-errCh
 	cancel()
@@ -216,6 +251,8 @@ func (t *Tunnel) readLoop(ctx context.Context, tunWrite func([]byte) error) erro
 			if len(payload) == 0 {
 				continue
 			}
+			t.Stats.BytesReceived.Add(int64(len(payload)))
+			t.Stats.PacketsRecv.Add(1)
 			if err := tunWrite(payload); err != nil {
 				return fmt.Errorf("writing to TUN: %w", err)
 			}
@@ -245,6 +282,8 @@ func (t *Tunnel) writeLoop(ctx context.Context, tunRead func() ([]byte, error)) 
 			continue
 		}
 
+		t.Stats.BytesSent.Add(int64(len(data)))
+		t.Stats.PacketsSent.Add(1)
 		if err := t.Write(data); err != nil {
 			return fmt.Errorf("writing to tunnel: %w", err)
 		}
