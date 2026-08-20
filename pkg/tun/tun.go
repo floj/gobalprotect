@@ -177,13 +177,23 @@ func (d *Device) configure(cfg Config) error {
 		if route == "" || route == "0.0.0.0/0" {
 			continue
 		}
+		var dst net.IP
+		var prefixLen uint8
 		_, cidr, err := net.ParseCIDR(route)
 		if err != nil {
-			d.logger.Warn("invalid route CIDR, skipping", "route", route, "error", err)
-			continue
+			ip := net.ParseIP(route).To4()
+			if ip == nil {
+				d.logger.Warn("invalid route, skipping", "route", route, "error", err)
+				continue
+			}
+			dst = ip
+			prefixLen = 32
+		} else {
+			dst = cidr.IP.To4()
+			ones, _ := cidr.Mask.Size()
+			prefixLen = uint8(ones)
 		}
-		ones, _ := cidr.Mask.Size()
-		if err := addRoute(conn, cidr.IP.To4(), uint8(ones), unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: cidr.IP.To4(), OutIface: ifIndex}); err != nil {
+		if err := addRoute(conn, dst, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
 			d.logger.Warn("failed to add route", "route", route, "error", err)
 		} else {
 			d.logger.Info("added route", "route", route)
