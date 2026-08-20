@@ -29,6 +29,7 @@ func main() {
 		verbose      = flag.Bool("verbose", false, "Enable debug logging")
 		noRoutes     = flag.Bool("no-routes", false, "Don't add split-tunnel routes from server config")
 		noDNS        = flag.Bool("no-dns", false, "Don't configure DNS from server config")
+		otp          = flag.String("otp", "", "OTP/MFA code to use for challenge response (skips interactive prompt)")
 	)
 
 	flag.Usage = func() {
@@ -68,6 +69,7 @@ func main() {
 		defaultRoute: *defaultRoute,
 		noRoutes:     *noRoutes,
 		noDNS:        *noDNS,
+		otp:          *otp,
 	}); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
@@ -85,6 +87,7 @@ type runConfig struct {
 	defaultRoute bool
 	noRoutes     bool
 	noDNS        bool
+	otp          string
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
@@ -102,16 +105,28 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
-	client.InputCallback = func(prompt string) (string, error) {
-		fmt.Fprintf(os.Stderr, "%s: ", prompt)
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return "", err
+	if cfg.otp != "" {
+		otpUsed := false
+		client.InputCallback = func(prompt string) (string, error) {
+			if otpUsed {
+				return "", fmt.Errorf("OTP already used, but server requested another challenge: %s", prompt)
 			}
-			return "", fmt.Errorf("no input provided")
+			otpUsed = true
+			logger.Info("using OTP from command line", "prompt", prompt)
+			return cfg.otp, nil
 		}
-		return strings.TrimSpace(scanner.Text()), nil
+	} else {
+		client.InputCallback = func(prompt string) (string, error) {
+			fmt.Fprintf(os.Stderr, "%s: ", prompt)
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					return "", err
+				}
+				return "", fmt.Errorf("no input provided")
+			}
+			return strings.TrimSpace(scanner.Text()), nil
+		}
 	}
 
 	// Authenticate
