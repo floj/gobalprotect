@@ -1,0 +1,60 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+title: gobalprotect config
+type: object
+properties:
+  default_profile:
+    type: string
+    description: Name of the default profile to use when --profile is not specified.
+  profiles:
+    type: array
+    description: List of tunnel profiles.
+    items:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Profile name used to select this tunnel.
+        server:
+          type: string
+          description: GlobalProtect gateway address.
+        username:
+          type: string
+          description: Username for password authentication.
+        cookie_name:
+          type: string
+          description: Cookie/token field name for SAML auth (e.g. prelogin-cookie).
+        insecure:
+          type: boolean
+          description: Skip TLS certificate verification.
+          default: false
+        tun:
+          type: string
+          description: TUN device name. If empty, auto-assigned.
+        as_default_route:
+          type: boolean
+          description: Set default route through VPN tunnel.
+          default: false
+        verbose:
+          type: boolean
+          description: Enable debug logging.
+          default: false
+        log_json:
+          type: boolean
+          description: Output logs in JSON format.
+          default: false
+        no_routes:
+          type: boolean
+          description: Don't add split-tunnel routes from server config.
+          default: false
+        no_dns:
+          type: boolean
+          description: Don't configure DNS from server config.
+          default: false
+        computer:
+          type: string
+          description: Computer name to report to the gateway.
+      required:
+        - name
+        - server
+required:
+  - profiles

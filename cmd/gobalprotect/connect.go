@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/goccy/go-yaml"
 	cli "github.com/urfave/cli/v3"
 	"golang.org/x/term"
 
@@ -24,11 +25,22 @@ func connectCommand() *cli.Command {
 		Usage: "Connect to a GlobalProtect VPN gateway",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "server",
-				Aliases:  []string{"s"},
-				Usage:    "GlobalProtect gateway address",
-				Required: true,
-				Sources:  cli.EnvVars("GP_SERVER"),
+				Name:    "config",
+				Aliases: []string{"c"},
+				Usage:   "Path to YAML config file",
+				Sources: cli.EnvVars("GP_CONFIG"),
+			},
+			&cli.StringFlag{
+				Name:    "profile",
+				Aliases: []string{"p"},
+				Usage:   "Tunnel profile name from config file",
+				Sources: cli.EnvVars("GP_PROFILE"),
+			},
+			&cli.StringFlag{
+				Name:    "server",
+				Aliases: []string{"s"},
+				Usage:   "GlobalProtect gateway address",
+				Sources: cli.EnvVars("GP_SERVER"),
 			},
 			&cli.StringFlag{
 				Name:    "username",
@@ -38,7 +50,6 @@ func connectCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "password",
-				Aliases: []string{"p"},
 				Usage:   "Password",
 				Sources: cli.EnvVars("GP_PASSWD"),
 			},
@@ -98,18 +109,27 @@ func connectCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "computer",
-				Aliases: []string{"c"},
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			// Load config file as base, flags/env override
+			var fileCfg tunnelConfig
+			if cfgPath := cmd.String("config"); cfgPath != "" {
+				var err error
+				fileCfg, err = loadConfigFile(cfgPath, cmd.String("profile"))
+				if err != nil {
+					return fmt.Errorf("loading config file: %w", err)
+				}
+			}
+
 			logLevel := slog.LevelInfo
-			if cmd.Bool("verbose") {
+			if cmd.Bool("verbose") || fileCfg.Verbose {
 				logLevel = slog.LevelDebug
 			}
 			var handler slog.Handler
-			if cmd.Bool("log-json") {
+			if cmd.Bool("log-json") || fileCfg.LogJSON {
 				handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 			} else {
 				handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
@@ -119,9 +139,9 @@ func connectCommand() *cli.Command {
 			ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			username := cmd.String("username")
+			username := coalesce(cmd.String("username"), fileCfg.Username)
 			password := cmd.String("password")
-			cookieName := cmd.String("cookie-name")
+			cookieName := coalesce(cmd.String("cookie-name"), fileCfg.CookieName)
 			cookieValue := cmd.String("cookie-value")
 
 			if cookieName == "" || cookieValue == "" {
@@ -148,36 +168,108 @@ func connectCommand() *cli.Command {
 			}
 
 			return run(ctx, logger, runConfig{
-				server:       cmd.String("server"),
-				username:     username,
-				password:     password,
-				cookieName:   cookieName,
-				cookieValue:  cookieValue,
-				insecure:     cmd.Bool("insecure"),
-				tunName:      cmd.String("tun"),
-				defaultRoute: cmd.Bool("default-route"),
-				noRoutes:     cmd.Bool("no-routes"),
-				noDNS:        cmd.Bool("no-dns"),
-				otp:          cmd.String("otp"),
-				computer:     cmd.String("computer"),
+				server:         coalesce(cmd.String("server"), fileCfg.Server),
+				username:       username,
+				password:       password,
+				cookieName:     cookieName,
+				cookieValue:    cookieValue,
+				insecure:       cmd.Bool("insecure") || fileCfg.Insecure,
+				tunName:        coalesce(cmd.String("tun"), fileCfg.Tun),
+				asDefaultRoute: cmd.Bool("default-route") || fileCfg.AsDefaultRoute,
+				noRoutes:       cmd.Bool("no-routes") || fileCfg.NoRoutes,
+				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
+				otp:            coalesce(cmd.String("otp"), fileCfg.OTP),
+				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
 			})
 		},
 	}
 }
 
 type runConfig struct {
-	server       string
-	username     string
-	password     string
-	cookieName   string
-	cookieValue  string
-	insecure     bool
-	tunName      string
-	defaultRoute bool
-	noRoutes     bool
-	noDNS        bool
-	otp          string
-	computer     string
+	server         string
+	username       string
+	password       string
+	cookieName     string
+	cookieValue    string
+	insecure       bool
+	tunName        string
+	asDefaultRoute bool
+	noRoutes       bool
+	noDNS          bool
+	otp            string
+	computer       string
+}
+
+type configFile struct {
+	DefaultProfile string         `yaml:"default_profile"`
+	Profiles       []tunnelConfig `yaml:"profiles"`
+}
+
+type tunnelConfig struct {
+	Name           string `yaml:"name"`
+	Server         string `yaml:"server"`
+	Username       string `yaml:"username"`
+	CookieName     string `yaml:"cookie_name"`
+	Insecure       bool   `yaml:"insecure"`
+	Tun            string `yaml:"tun"`
+	AsDefaultRoute bool   `yaml:"as_default_route"`
+	Verbose        bool   `yaml:"verbose"`
+	LogJSON        bool   `yaml:"log_json"`
+	NoRoutes       bool   `yaml:"no_routes"`
+	NoDNS          bool   `yaml:"no_dns"`
+	OTP            string `yaml:"otp"`
+	Computer       string `yaml:"computer"`
+}
+
+func loadConfigFile(path string, profile string) (tunnelConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return tunnelConfig{}, err
+	}
+	var cfg configFile
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return tunnelConfig{}, err
+	}
+
+	if len(cfg.Profiles) == 0 {
+		return tunnelConfig{}, fmt.Errorf("no tunnels defined in config file")
+	}
+
+	// Determine which tunnel to use
+	name := profile
+	if name == "" {
+		name = cfg.DefaultProfile
+	}
+
+	// If only one tunnel defined, use it regardless of name
+	if len(cfg.Profiles) == 1 {
+		return cfg.Profiles[0], nil
+	}
+
+	if name == "" {
+		return tunnelConfig{}, fmt.Errorf("multiple tunnels defined but no profile specified (use --profile or set default_profile in config)")
+	}
+
+	for _, t := range cfg.Profiles {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+
+	available := make([]string, len(cfg.Profiles))
+	for i, t := range cfg.Profiles {
+		available[i] = t.Name
+	}
+	return tunnelConfig{}, fmt.Errorf("profile %q not found in config (available: %s)", name, strings.Join(available, ", "))
+}
+
+func coalesce(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
@@ -267,7 +359,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	}()
 
 	// Set default route if requested
-	if cfg.defaultRoute && vpnConfig.Gateway != "" {
+	if cfg.asDefaultRoute && vpnConfig.Gateway != "" {
 		if err := tunDev.AddDefaultRoute(cfg.server); err != nil {
 			logger.Warn("failed to add default route", "error", err)
 		}
