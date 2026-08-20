@@ -177,44 +177,37 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		errCh <- t.writeLoop(ctx, tunRead)
 	}()
 
-	// Keepalive loop
+	// Keepalive and stats loop
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
+		keepaliveTicker := time.NewTicker(10 * time.Second)
+		defer keepaliveTicker.Stop()
+
+		statsTicker := time.NewTicker(1 * time.Minute)
+		defer statsTicker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-keepaliveTicker.C:
 				if err := t.SendKeepalive(); err != nil {
 					t.logger.Warn("keepalive failed", "error", err)
 					return
 				}
 				t.logger.Debug("sent keepalive")
+			case <-statsTicker.C:
+				if t.DisableStats {
+					continue
+				}
+				t.logger.Info("tunnel stats",
+					"sent_bytes", t.Stats.BytesSent.Load(),
+					"recv_bytes", t.Stats.BytesReceived.Load(),
+					"sent_packets", t.Stats.PacketsSent.Load(),
+					"recv_packets", t.Stats.PacketsRecv.Load(),
+				)
 			}
 		}
 	}()
-
-	// Stats loop
-	if !t.DisableStats {
-		go func() {
-			ticker := time.NewTicker(1 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					t.logger.Info("tunnel stats",
-						"sent_bytes", t.Stats.BytesSent.Load(),
-						"recv_bytes", t.Stats.BytesReceived.Load(),
-						"sent_packets", t.Stats.PacketsSent.Load(),
-						"recv_packets", t.Stats.PacketsRecv.Load(),
-					)
-				}
-			}
-		}()
-	}
 
 	// Wait for first error
 	err := <-errCh
