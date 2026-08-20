@@ -212,6 +212,14 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 	// Wait for first error
 	err := <-errCh
 	cancel()
+
+	t.logger.Info("tunnel stats (final)",
+		"sent_bytes", t.Stats.BytesSent.Load(),
+		"recv_bytes", t.Stats.BytesReceived.Load(),
+		"sent_packets", t.Stats.PacketsSent.Load(),
+		"recv_packets", t.Stats.PacketsRecv.Load(),
+	)
+
 	return err
 }
 
