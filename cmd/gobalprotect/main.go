@@ -83,6 +83,11 @@ func main() {
 				Usage:   "OTP/MFA code to use for challenge response (skips interactive prompt)",
 				Sources: cli.EnvVars("GP_OTP"),
 			},
+			&cli.StringFlag{
+				Name:    "computer",
+				Usage:   "Computer name to report to the gateway (default: auto-detect)",
+				Sources: cli.EnvVars("GP_COMPUTER"),
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			logLevel := slog.LevelInfo
@@ -106,6 +111,7 @@ func main() {
 				noRoutes:     cmd.Bool("no-routes"),
 				noDNS:        cmd.Bool("no-dns"),
 				otp:          cmd.String("otp"),
+				computer:     cmd.String("computer"),
 			})
 		},
 	}
@@ -127,11 +133,14 @@ type runConfig struct {
 	noRoutes     bool
 	noDNS        bool
 	otp          string
+	computer     string
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
+
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
+	client.Computer = cfg.computer
 	if cfg.otp != "" {
 		otpUsed := false
 		client.InputCallback = func(prompt string) (string, error) {
@@ -139,7 +148,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 				return "", fmt.Errorf("OTP already used, but server requested another challenge: %s", prompt)
 			}
 			otpUsed = true
-			logger.Info("using OTP from command line", "prompt", prompt)
+			logger.Info("using OTP from command line", "prompt", prompt, "otp", cfg.otp)
 			return cfg.otp, nil
 		}
 	} else {
@@ -237,6 +246,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		"ip", vpnConfig.IPAddress,
 		"dns", strings.Join(vpnConfig.DNS, ", "),
 	)
+
+	go func() {
+		<-ctx.Done()
+		logger.Info("context canceled, closing tunnel")
+	}()
 
 	// Run the data loop
 	err = tunnel.RunDataLoop(ctx, tunDev.Read, tunDev.Write)

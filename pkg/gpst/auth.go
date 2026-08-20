@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/dop251/goja"
@@ -69,6 +70,7 @@ type Client struct {
 	Server        string
 	Username      string
 	Password      string
+	Computer      string
 	UserAgent     string
 	HTTPClient    *http.Client
 	Logger        *slog.Logger
@@ -158,11 +160,11 @@ func (c *Client) Login() (*AuthCookie, error) {
 	form.Set("clientos", "Linux")
 	form.Set("os-version", "linux")
 	form.Set("server", c.Server)
-	form.Set("computer", hostname())
+	form.Set("computer", c.computerName())
 	form.Set("user", c.Username)
 	form.Set("passwd", c.Password)
 
-	c.Logger.Debug("sending login request", "url", loginURL)
+	c.Logger.Debug("sending login request", "url", loginURL, "username", c.Username)
 
 	req, err := http.NewRequest("POST", loginURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -188,13 +190,14 @@ func (c *Client) Login() (*AuthCookie, error) {
 		return nil, fmt.Errorf("login returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	cookie, ch, err := parseLoginOrChallenge(body)
+	cookie, ch, err := c.parseLoginOrChallenge(body)
 	if err != nil {
 		return nil, err
 	}
 	if ch != nil {
 		return c.handleChallenge(ch)
 	}
+	cookie.Computer = c.computerName()
 	return cookie, nil
 }
 
@@ -224,7 +227,7 @@ func (c *Client) handleChallenge(ch *challenge) (*AuthCookie, error) {
 	form.Set("clientos", "Linux")
 	form.Set("os-version", "linux")
 	form.Set("server", c.Server)
-	form.Set("computer", hostname())
+	form.Set("computer", c.computerName())
 	form.Set("user", c.Username)
 	form.Set("passwd", otp)
 	form.Set("inputStr", ch.InputStr)
@@ -255,13 +258,14 @@ func (c *Client) handleChallenge(ch *challenge) (*AuthCookie, error) {
 		return nil, fmt.Errorf("challenge login returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	cookie, ch2, err := parseLoginOrChallenge(body)
+	cookie, ch2, err := c.parseLoginOrChallenge(body)
 	if err != nil {
 		return nil, err
 	}
 	if ch2 != nil {
 		return nil, fmt.Errorf("server sent another challenge after OTP submission: %s", ch2.Message)
 	}
+	cookie.Computer = c.computerName()
 	return cookie, nil
 }
 
@@ -279,7 +283,7 @@ func (c *Client) LoginWithCookie(cookieName, cookieValue string) (*AuthCookie, e
 	form.Set("clientos", "Linux")
 	form.Set("os-version", "linux")
 	form.Set("server", c.Server)
-	form.Set("computer", hostname())
+	form.Set("computer", c.computerName())
 	form.Set("user", c.Username)
 	form.Set(cookieName, cookieValue)
 
@@ -307,20 +311,21 @@ func (c *Client) LoginWithCookie(cookieName, cookieValue string) (*AuthCookie, e
 		return nil, fmt.Errorf("login returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	cookie, ch, err := parseLoginOrChallenge(body)
+	cookie, ch, err := c.parseLoginOrChallenge(body)
 	if err != nil {
 		return nil, err
 	}
 	if ch != nil {
 		return c.handleChallenge(ch)
 	}
+	cookie.Computer = c.computerName()
 	return cookie, nil
 }
 
 // parseLoginOrChallenge tries to parse the login response as JNLP XML.
 // If it's a JavaScript challenge, it returns (nil, challenge, nil).
 // If it's a successful login, it returns (cookie, nil, nil).
-func parseLoginOrChallenge(body []byte) (*AuthCookie, *challenge, error) {
+func (c *Client) parseLoginOrChallenge(body []byte) (*AuthCookie, *challenge, error) {
 	// First check if this is a JavaScript challenge response
 	if ch, ok := parseJavaScriptChallenge(body); ok {
 		if ch.Status == "Challenge" {
@@ -379,7 +384,7 @@ func parseLoginOrChallenge(body []byte) (*AuthCookie, *challenge, error) {
 	cookie.User = get(4)
 	cookie.Domain = get(7)
 	cookie.PreferredIP = get(15)
-	cookie.Computer = hostname()
+	cookie.Computer = c.computerName()
 
 	if cookie.AuthCookie == "" {
 		return nil, nil, fmt.Errorf("no authcookie in login response")
@@ -429,18 +434,21 @@ func (c *Client) Logout(cookie *AuthCookie) error {
 	return nil
 }
 
-func hostname() string {
-	// Best-effort hostname
-	h, _ := hostnameFn()
-	if h == "" {
-		h = "localhost"
+func (c *Client) computerName() string {
+	if c.Computer != "" {
+		return c.Computer
 	}
-	return h
-}
-
-// Separated for testability
-var hostnameFn = func() (string, error) {
-	return osHostname()
+	h, _ := os.Hostname()
+	if h != "" {
+		return h
+	}
+	if h = os.Getenv("HOST"); h != "" {
+		return h
+	}
+	if h = os.Getenv("HOSTNAME"); h != "" {
+		return h
+	}
+	return "localhost"
 }
 
 // parseJavaScriptChallenge attempts to parse a JavaScript challenge response
