@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,66 +11,103 @@ import (
 	"strings"
 	"syscall"
 
+	cli "github.com/urfave/cli/v3"
+
 	"github.com/floj/gobalprotect/gpst"
 	"github.com/floj/gobalprotect/tun"
 )
 
 func main() {
-	var (
-		server       = flag.String("server", "", "GlobalProtect gateway address (required)")
-		username     = flag.String("user", "", "Username (required for password auth)")
-		password     = flag.String("passwd", "", "Password")
-		cookieName   = flag.String("cookie-name", "", "Cookie/token field name for SAML auth (e.g. prelogin-cookie)")
-		cookieValue  = flag.String("cookie-value", "", "Cookie/token value for SAML auth")
-		insecure     = flag.Bool("insecure", false, "Skip TLS certificate verification")
-		tunName      = flag.String("tun", "", "TUN device name (default: auto)")
-		defaultRoute = flag.Bool("default-route", false, "Set default route through VPN tunnel")
-		verbose      = flag.Bool("verbose", false, "Enable debug logging")
-		noRoutes     = flag.Bool("no-routes", false, "Don't add split-tunnel routes from server config")
-		noDNS        = flag.Bool("no-dns", false, "Don't configure DNS from server config")
-		otp          = flag.String("otp", "", "OTP/MFA code to use for challenge response (skips interactive prompt)")
-	)
+	cmd := &cli.Command{
+		Name:  "gobalprotect",
+		Usage: "GlobalProtect VPN client using TUN device",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "server",
+				Usage:    "GlobalProtect gateway address",
+				Required: true,
+				Sources:  cli.EnvVars("GP_SERVER"),
+			},
+			&cli.StringFlag{
+				Name:    "username",
+				Usage:   "Username (required for password auth)",
+				Sources: cli.EnvVars("GP_USER"),
+			},
+			&cli.StringFlag{
+				Name:    "password",
+				Usage:   "Password",
+				Sources: cli.EnvVars("GP_PASSWD"),
+			},
+			&cli.StringFlag{
+				Name:    "cookie-name",
+				Usage:   "Cookie/token field name for SAML auth (e.g. prelogin-cookie)",
+				Sources: cli.EnvVars("GP_COOKIE_NAME"),
+			},
+			&cli.StringFlag{
+				Name:    "cookie-value",
+				Usage:   "Cookie/token value for SAML auth",
+				Sources: cli.EnvVars("GP_COOKIE_VALUE"),
+			},
+			&cli.BoolFlag{
+				Name:    "insecure",
+				Usage:   "Skip TLS certificate verification",
+				Sources: cli.EnvVars("GP_INSECURE"),
+			},
+			&cli.StringFlag{
+				Name:    "tun",
+				Usage:   "TUN device name (default: auto)",
+				Sources: cli.EnvVars("GP_TUN"),
+			},
+			&cli.BoolFlag{
+				Name:    "default-route",
+				Usage:   "Set default route through VPN tunnel",
+				Sources: cli.EnvVars("GP_DEFAULT_ROUTE"),
+			},
+			&cli.BoolFlag{
+				Name:    "verbose",
+				Usage:   "Enable debug logging",
+				Sources: cli.EnvVars("GP_VERBOSE"),
+			},
+			&cli.BoolFlag{
+				Name:    "no-routes",
+				Usage:   "Don't add split-tunnel routes from server config",
+				Sources: cli.EnvVars("GP_NO_ROUTES"),
+			},
+			&cli.BoolFlag{
+				Name:    "no-dns",
+				Usage:   "Don't configure DNS from server config",
+				Sources: cli.EnvVars("GP_NO_DNS"),
+			},
+			&cli.StringFlag{
+				Name:    "otp",
+				Usage:   "OTP/MFA code to use for challenge response (skips interactive prompt)",
+				Sources: cli.EnvVars("GP_OTP"),
+			},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			logLevel := slog.LevelInfo
+			if cmd.Bool("verbose") {
+				logLevel = slog.LevelDebug
+			}
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "GlobalProtect VPN client using TUN device\n\n")
-		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  Password auth:\n")
-		fmt.Fprintf(os.Stderr, "    %s -server vpn.example.com -user myuser -passwd mypass\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  SAML/cookie auth:\n")
-		fmt.Fprintf(os.Stderr, "    %s -server vpn.example.com -user myuser -cookie-name prelogin-cookie -cookie-value TOKEN\n\n", os.Args[0])
+			return run(ctx, logger, runConfig{
+				server:       cmd.String("server"),
+				username:     cmd.String("username"),
+				password:     cmd.String("password"),
+				cookieName:   cmd.String("cookie-name"),
+				cookieValue:  cmd.String("cookie-value"),
+				insecure:     cmd.Bool("insecure"),
+				tunName:      cmd.String("tun"),
+				defaultRoute: cmd.Bool("default-route"),
+				noRoutes:     cmd.Bool("no-routes"),
+				noDNS:        cmd.Bool("no-dns"),
+				otp:          cmd.String("otp"),
+			})
+		},
 	}
 
-	flag.Parse()
-
-	if *server == "" {
-		fmt.Fprintln(os.Stderr, "Error: -server is required")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	logLevel := slog.LevelInfo
-	if *verbose {
-		logLevel = slog.LevelDebug
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
-
-	if err := run(context.Background(), logger, runConfig{
-		server:       *server,
-		username:     *username,
-		password:     *password,
-		cookieName:   *cookieName,
-		cookieValue:  *cookieValue,
-		insecure:     *insecure,
-		tunName:      *tunName,
-		defaultRoute: *defaultRoute,
-		noRoutes:     *noRoutes,
-		noDNS:        *noDNS,
-		otp:          *otp,
-	}); err != nil {
-		logger.Error("fatal", "error", err)
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		os.Exit(1)
 	}
 }
@@ -91,17 +127,9 @@ type runConfig struct {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
-	// Handle signals for clean shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		logger.Info("received signal, shutting down", "signal", sig)
-		cancel()
-	}()
+	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
