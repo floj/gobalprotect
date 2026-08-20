@@ -27,10 +27,14 @@ func versionCommand() *cli.Command {
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if cmd.Bool("json") {
-				info := map[string]string{
-					"name":      "gobalprotect",
-					"version":   version,
-					"buildDate": buildDate,
+				info := struct {
+					Name      string `json:"name"`
+					Version   string `json:"version"`
+					BuildDate string `json:"buildDate"`
+				}{
+					Name:      "gobalprotect",
+					Version:   version,
+					BuildDate: buildDate,
 				}
 				enc := json.NewEncoder(os.Stdout)
 				if cmd.Bool("pretty") {
