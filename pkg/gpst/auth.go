@@ -78,7 +78,7 @@ type Client struct {
 }
 
 // NewClient creates a new GlobalProtect client.
-func NewClient(server, username, password string, insecure bool, logger *slog.Logger) *Client {
+func NewClient(server, username, password, computer string, insecure bool, logger *slog.Logger) *Client {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: insecure, //nolint:gosec // User-controlled option for self-signed certs
@@ -88,6 +88,7 @@ func NewClient(server, username, password string, insecure bool, logger *slog.Lo
 		Server:    server,
 		Username:  username,
 		Password:  password,
+		Computer:  computer,
 		UserAgent: "PAN GlobalProtect",
 		HTTPClient: &http.Client{
 			Transport: transport,

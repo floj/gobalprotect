@@ -153,8 +153,7 @@ type runConfig struct {
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	// Create GP client
-	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
-	client.Computer = cfg.computer
+	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {
 		otpUsed := false
 		client.InputCallback = func(prompt string) (string, error) {
