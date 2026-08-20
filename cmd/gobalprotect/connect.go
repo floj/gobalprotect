@@ -24,17 +24,20 @@ func connectCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "server",
+				Aliases:  []string{"s"},
 				Usage:    "GlobalProtect gateway address",
 				Required: true,
 				Sources:  cli.EnvVars("GP_SERVER"),
 			},
 			&cli.StringFlag{
 				Name:    "username",
+				Aliases: []string{"u"},
 				Usage:   "Username (required for password auth)",
 				Sources: cli.EnvVars("GP_USER"),
 			},
 			&cli.StringFlag{
 				Name:    "password",
+				Aliases: []string{"p"},
 				Usage:   "Password",
 				Sources: cli.EnvVars("GP_PASSWD"),
 			},
@@ -50,11 +53,13 @@ func connectCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:    "insecure",
+				Aliases: []string{"k"},
 				Usage:   "Skip TLS certificate verification",
 				Sources: cli.EnvVars("GP_INSECURE"),
 			},
 			&cli.StringFlag{
 				Name:    "tun",
+				Aliases: []string{"t"},
 				Usage:   "TUN device name (default: auto)",
 				Sources: cli.EnvVars("GP_TUN"),
 			},
@@ -65,6 +70,7 @@ func connectCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:    "verbose",
+				Aliases: []string{"v"},
 				Usage:   "Enable debug logging",
 				Sources: cli.EnvVars("GP_VERBOSE"),
 			},
@@ -85,11 +91,13 @@ func connectCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "otp",
+				Aliases: []string{"o"},
 				Usage:   "OTP/MFA code to use for challenge response (skips interactive prompt)",
 				Sources: cli.EnvVars("GP_OTP"),
 			},
 			&cli.StringFlag{
 				Name:    "computer",
+				Aliases: []string{"c"},
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
 			},
