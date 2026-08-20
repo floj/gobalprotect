@@ -56,6 +56,11 @@ func connectCommand() *cli.Command {
 				Sources: cli.EnvVars("GP_PASSWD"),
 			},
 			&cli.StringFlag{
+				Name:    "password-cmd",
+				Usage:   "Shell command to execute to obtain password (stdout is used, 10s timeout)",
+				Sources: cli.EnvVars("GP_PASSWD_CMD"),
+			},
+			&cli.StringFlag{
 				Name:    "cookie-name",
 				Usage:   "Cookie/token field name for SAML auth (e.g. prelogin-cookie)",
 				Sources: cli.EnvVars("GP_COOKIE_NAME"),
@@ -151,6 +156,29 @@ func connectCommand() *cli.Command {
 			cookieName := coalesce(cmd.String("cookie-name"), fileCfg.CookieName)
 			cookieValue := cmd.String("cookie-value")
 
+			// Resolve password from command if password-cmd is set
+			passwordCmd := coalesce(cmd.String("password-cmd"), fileCfg.PasswordCmd)
+			if password == "" && passwordCmd != "" {
+				pw, err := runShellCmd(ctx, passwordCmd)
+				if err != nil {
+					return fmt.Errorf("password-cmd failed: %w", err)
+				}
+				password = pw
+				logger.Debug("obtained password from command", "cmd", passwordCmd, "password", strings.Repeat("*", len(password)))
+			}
+
+			// Resolve OTP from command if otp-cmd is set
+			otp := cmd.String("otp")
+			otpCmd := coalesce(cmd.String("otp-cmd"), fileCfg.OTPCmd)
+			if otp == "" && otpCmd != "" {
+				result, err := runShellCmd(ctx, otpCmd)
+				if err != nil {
+					return fmt.Errorf("otp-cmd failed: %w", err)
+				}
+				otp = result
+				logger.Debug("obtained OTP from command", "cmd", otpCmd, "otp", otp)
+			}
+
 			if cookieName == "" || cookieValue == "" {
 				if username == "" {
 					fmt.Fprint(os.Stderr, "Username: ")
@@ -185,8 +213,7 @@ func connectCommand() *cli.Command {
 				asDefaultRoute: cmd.Bool("default-route") || fileCfg.AsDefaultRoute,
 				noRoutes:       cmd.Bool("no-routes") || fileCfg.NoRoutes,
 				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
-				otp:            coalesce(cmd.String("otp"), fileCfg.OTP),
-				otpCmd:         coalesce(cmd.String("otp-cmd"), fileCfg.OTPCmd),
+				otp:            otp,
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
 			})
 		},
@@ -205,7 +232,6 @@ type runConfig struct {
 	noRoutes       bool
 	noDNS          bool
 	otp            string
-	otpCmd         string
 	computer       string
 }
 
@@ -218,6 +244,7 @@ type tunnelConfig struct {
 	Name           string `yaml:"name"`
 	Server         string `yaml:"server"`
 	Username       string `yaml:"username"`
+	PasswordCmd    string `yaml:"password_cmd"`
 	CookieName     string `yaml:"cookie_name"`
 	Insecure       bool   `yaml:"insecure"`
 	Tun            string `yaml:"tun"`
@@ -226,7 +253,6 @@ type tunnelConfig struct {
 	LogJSON        bool   `yaml:"log_json"`
 	NoRoutes       bool   `yaml:"no_routes"`
 	NoDNS          bool   `yaml:"no_dns"`
-	OTP            string `yaml:"otp"`
 	OTPCmd         string `yaml:"otp_cmd"`
 	Computer       string `yaml:"computer"`
 }
@@ -282,7 +308,7 @@ func coalesce(values ...string) string {
 	return ""
 }
 
-func runOTPCmd(ctx context.Context, command string) (string, error) {
+func runShellCmd(ctx context.Context, command string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -295,16 +321,6 @@ func runOTPCmd(ctx context.Context, command string) (string, error) {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
-	// Resolve OTP from command if otp-cmd is set and otp is not already provided
-	if cfg.otp == "" && cfg.otpCmd != "" {
-		otp, err := runOTPCmd(ctx, cfg.otpCmd)
-		if err != nil {
-			return fmt.Errorf("otp-cmd failed: %w", err)
-		}
-		cfg.otp = otp
-		logger.Debug("obtained OTP from command", "cmd", cfg.otpCmd)
-	}
-
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {

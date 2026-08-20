@@ -20,6 +20,9 @@ properties:
         username:
           type: string
           description: Username for password authentication.
+        password_cmd:
+          type: string
+          description: Shell command to execute to obtain password (stdout is used, 10s timeout).
         cookie_name:
           type: string
           description: Cookie/token field name for SAML auth (e.g. prelogin-cookie).
