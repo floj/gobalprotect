@@ -13,8 +13,8 @@ import (
 
 	cli "github.com/urfave/cli/v3"
 
-	"github.com/floj/gobalprotect/gpst"
-	"github.com/floj/gobalprotect/tun"
+	"github.com/floj/gobalprotect/pkg/gpst"
+	"github.com/floj/gobalprotect/pkg/tun"
 )
 
 func main() {
