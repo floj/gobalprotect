@@ -181,8 +181,9 @@ func connectCommand() *cli.Command {
 			if cookieName == "" || cookieValue == "" {
 				if username == "" {
 					prompt := promptui.Prompt{
-						Label:  "Username",
-						Stdout: os.Stderr,
+						Label:     "Username",
+						Stdout:    os.Stderr,
+						Templates: promptTemplates(),
 					}
 					result, err := prompt.Run()
 					if err != nil {
@@ -196,9 +197,10 @@ func connectCommand() *cli.Command {
 
 				if password == "" {
 					prompt := promptui.Prompt{
-						Label:  "Password",
-						Mask:   '*',
-						Stdout: os.Stderr,
+						Label:     "Password",
+						Mask:      '*',
+						Stdout:    os.Stderr,
+						Templates: promptTemplates(),
 					}
 					result, err := prompt.Run()
 					if err != nil {
@@ -303,6 +305,15 @@ func loadConfigFile(path string, profile string) (tunnelConfig, error) {
 		available[i] = t.Name
 	}
 	return tunnelConfig{}, fmt.Errorf("profile %q not found in config (available: %s)", name, strings.Join(available, ", "))
+}
+
+func promptTemplates() *promptui.PromptTemplates {
+	return &promptui.PromptTemplates{
+		Prompt:  "{{ . }}: ",
+		Valid:   "{{ . }}: ",
+		Invalid: "{{ . }}: ",
+		Success: "{{ . }}: ",
+	}
 }
 
 func coalesce(values ...string) string {
@@ -457,8 +468,9 @@ func interactiveInputCallback(ctx context.Context) func(string) (string, error) 
 		errCh := make(chan error, 1)
 		go func() {
 			p := promptui.Prompt{
-				Label:  prompt,
-				Stdout: os.Stderr,
+				Label:     prompt,
+				Stdout:    os.Stderr,
+				Templates: promptTemplates(),
 			}
 			result, err := p.Run()
 			if err != nil {
