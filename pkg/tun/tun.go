@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/jsimonetti/rtnetlink"
 	"github.com/songgao/water"
+	"golang.org/x/sys/unix"
 )
 
 // Device represents a TUN network device.
@@ -85,36 +87,80 @@ func (d *Device) Close() error {
 	return d.iface.Close()
 }
 
+// ifaceIndex returns the kernel interface index for this device.
+func (d *Device) ifaceIndex() (uint32, error) {
+	iface, err := net.InterfaceByName(d.name)
+	if err != nil {
+		return 0, fmt.Errorf("looking up interface %s: %w", d.name, err)
+	}
+	return uint32(iface.Index), nil
+}
+
 func (d *Device) configure(cfg Config) error {
 	mtu := cfg.MTU
 	if mtu == 0 {
 		mtu = 1400
 	}
 
-	// Compute peer address for point-to-point link
-	peerAddr := cfg.Address
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		return fmt.Errorf("dialing rtnetlink: %w", err)
+	}
+	defer conn.Close()
 
-	// Set IP address and bring up interface
-	if err := run("ip", "addr", "add", cfg.Address+"/32", "peer", peerAddr, "dev", d.name); err != nil {
+	ifIndex, err := d.ifaceIndex()
+	if err != nil {
+		return err
+	}
+
+	// Set IP address (point-to-point: address/32 peer address)
+	addr := net.ParseIP(cfg.Address).To4()
+	if addr == nil {
+		return fmt.Errorf("invalid IP address: %s", cfg.Address)
+	}
+
+	if err := conn.Address.New(&rtnetlink.AddressMessage{
+		Family:       unix.AF_INET,
+		PrefixLength: 32,
+		Scope:        unix.RT_SCOPE_UNIVERSE,
+		Index:        ifIndex,
+		Attributes: &rtnetlink.AddressAttributes{
+			Address: addr,
+			Local:   addr,
+		},
+	}); err != nil {
 		return fmt.Errorf("setting IP address: %w", err)
 	}
 
-	if err := run("ip", "link", "set", "dev", d.name, "mtu", fmt.Sprintf("%d", mtu), "up"); err != nil {
+	// Set MTU and bring up interface
+	mtuU32 := uint32(mtu)
+	if err := conn.Link.Set(&rtnetlink.LinkMessage{
+		Index:  ifIndex,
+		Flags:  unix.IFF_UP,
+		Change: unix.IFF_UP,
+		Attributes: &rtnetlink.LinkAttributes{
+			MTU: mtuU32,
+		},
+	}); err != nil {
 		return fmt.Errorf("setting MTU and bringing up interface: %w", err)
 	}
 
 	d.logger.Info("TUN device configured", "address", cfg.Address, "mtu", mtu)
 
 	// Add host routes for excluded IPs (e.g. VPN server) via existing default gateway
-	// to prevent routing loops when split routes cover the VPN server's IP.
 	if len(cfg.ExcludeIPs) > 0 {
-		if gw := detectDefaultGateway(); gw != "" {
+		if gw := detectDefaultGateway(conn); gw != nil {
 			for _, ip := range cfg.ExcludeIPs {
 				ip = strings.TrimSpace(ip)
 				if ip == "" {
 					continue
 				}
-				if err := run("ip", "route", "add", ip+"/32", "via", gw); err != nil {
+				dst := net.ParseIP(ip).To4()
+				if dst == nil {
+					d.logger.Warn("invalid exclude IP, skipping", "ip", ip)
+					continue
+				}
+				if err := addRoute(conn, dst, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst, Gateway: gw}); err != nil {
 					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw, "error", err)
 				} else {
 					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw)
@@ -129,9 +175,15 @@ func (d *Device) configure(cfg Config) error {
 	for _, route := range cfg.Routes {
 		route = strings.TrimSpace(route)
 		if route == "" || route == "0.0.0.0/0" {
-			continue // skip default route for safety; user can add it manually
+			continue
 		}
-		if err := run("ip", "route", "add", route, "dev", d.name); err != nil {
+		_, cidr, err := net.ParseCIDR(route)
+		if err != nil {
+			d.logger.Warn("invalid route CIDR, skipping", "route", route, "error", err)
+			continue
+		}
+		ones, _ := cidr.Mask.Size()
+		if err := addRoute(conn, cidr.IP.To4(), uint8(ones), unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: cidr.IP.To4(), OutIface: ifIndex}); err != nil {
 			d.logger.Warn("failed to add route", "route", route, "error", err)
 		} else {
 			d.logger.Info("added route", "route", route)
@@ -181,36 +233,42 @@ func (d *Device) RemoveDNS() {
 // AddDefaultRoute adds a default route through the TUN device,
 // preserving the existing default route to the VPN gateway.
 func (d *Device) AddDefaultRoute(gatewayIP string) error {
-	// Find current default gateway
-	out, err := exec.Command("ip", "route", "show", "default").Output()
+	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
-		return fmt.Errorf("getting default route: %w", err)
+		return fmt.Errorf("dialing rtnetlink: %w", err)
+	}
+	defer conn.Close()
+
+	ifIndex, err := d.ifaceIndex()
+	if err != nil {
+		return err
 	}
 
-	// Add host route to VPN server via current default gateway
-	defaultRoute := strings.TrimSpace(string(out))
-	if defaultRoute != "" {
-		// Extract gateway IP from "default via X.X.X.X dev ethN"
-		parts := strings.Fields(defaultRoute)
-		for i, p := range parts {
-			if p == "via" && i+1 < len(parts) {
-				currentGW := parts[i+1]
-				// Add route to VPN server through current gateway
-				gwIP := net.ParseIP(gatewayIP)
-				if gwIP != nil {
-					if err := run("ip", "route", "add", gatewayIP+"/32", "via", currentGW); err != nil {
-						d.logger.Warn("failed to add host route to VPN server", "error", err)
-					}
-				}
-				break
+	// Find current default gateway and add host route to VPN server through it
+	if gw := detectDefaultGateway(conn); gw != nil {
+		serverIP := net.ParseIP(gatewayIP).To4()
+		if serverIP != nil {
+			if err := addRoute(conn, serverIP, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: serverIP, Gateway: gw}); err != nil {
+				d.logger.Warn("failed to add host route to VPN server", "error", err)
 			}
 		}
 	}
 
 	// Add default route through TUN
-	if err := run("ip", "route", "add", "default", "dev", d.name); err != nil {
+	defaultRoute := &rtnetlink.RouteMessage{
+		Family:    unix.AF_INET,
+		DstLength: 0,
+		Table:     unix.RT_TABLE_MAIN,
+		Protocol:  unix.RTPROT_STATIC,
+		Scope:     unix.RT_SCOPE_UNIVERSE,
+		Type:      unix.RTN_UNICAST,
+		Attributes: rtnetlink.RouteAttributes{
+			OutIface: ifIndex,
+		},
+	}
+	if err := conn.Route.Add(defaultRoute); err != nil {
 		// Try replacing instead
-		if err2 := run("ip", "route", "replace", "default", "dev", d.name); err2 != nil {
+		if err2 := conn.Route.Replace(defaultRoute); err2 != nil {
 			return fmt.Errorf("adding default route: %w", err2)
 		}
 	}
@@ -219,26 +277,33 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 	return nil
 }
 
-func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s %s: %s: %w", name, strings.Join(args, " "), strings.TrimSpace(string(out)), err)
-	}
-	return nil
+// addRoute adds a route with the given destination prefix, scope, and attributes.
+func addRoute(conn *rtnetlink.Conn, dst net.IP, prefixLen uint8, scope uint8, attrs rtnetlink.RouteAttributes) error {
+	return conn.Route.Add(&rtnetlink.RouteMessage{
+		Family:     unix.AF_INET,
+		DstLength:  prefixLen,
+		Table:      unix.RT_TABLE_MAIN,
+		Protocol:   unix.RTPROT_STATIC,
+		Scope:      scope,
+		Type:       unix.RTN_UNICAST,
+		Attributes: attrs,
+	})
 }
 
-// detectDefaultGateway returns the current default gateway IP, or "" if not found.
-func detectDefaultGateway() string {
-	out, err := exec.Command("ip", "route", "show", "default").Output()
+// detectDefaultGateway returns the current default gateway IP, or nil if not found.
+func detectDefaultGateway(conn *rtnetlink.Conn) net.IP {
+	routes, err := conn.Route.List()
 	if err != nil {
-		return ""
+		return nil
 	}
-	// Parse "default via X.X.X.X dev ethN ..."
-	parts := strings.Fields(strings.TrimSpace(string(out)))
-	for i, p := range parts {
-		if p == "via" && i+1 < len(parts) {
-			return parts[i+1]
+	for _, r := range routes {
+		if r.Family != unix.AF_INET {
+			continue
+		}
+		// Default route: DstLength == 0 and has a gateway
+		if r.DstLength == 0 && r.Attributes.Gateway != nil {
+			return r.Attributes.Gateway.To4()
 		}
 	}
-	return ""
+	return nil
 }
