@@ -313,6 +313,8 @@ func runShellCmd(ctx context.Context, command string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
