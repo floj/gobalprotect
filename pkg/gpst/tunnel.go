@@ -210,8 +210,6 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 						"recv_bytes", t.Stats.BytesReceived.Load(),
 						"sent_packets", t.Stats.PacketsSent.Load(),
 						"recv_packets", t.Stats.PacketsRecv.Load(),
-						"connections_open", 1,
-						"connections_total", 1,
 					)
 				}
 			}

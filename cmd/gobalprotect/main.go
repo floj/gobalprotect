@@ -83,11 +83,6 @@ func main() {
 				Usage:   "OTP/MFA code to use for challenge response (skips interactive prompt)",
 				Sources: cli.EnvVars("GP_OTP"),
 			},
-			&cli.BoolFlag{
-				Name:    "no-stats",
-				Usage:   "Don't print periodic tunnel statistics",
-				Sources: cli.EnvVars("GP_NO_STATS"),
-			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			logLevel := slog.LevelInfo
@@ -95,6 +90,9 @@ func main() {
 				logLevel = slog.LevelDebug
 			}
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+
+			ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
 
 			return run(ctx, logger, runConfig{
 				server:       cmd.String("server"),
@@ -108,7 +106,6 @@ func main() {
 				noRoutes:     cmd.Bool("no-routes"),
 				noDNS:        cmd.Bool("no-dns"),
 				otp:          cmd.String("otp"),
-				noStats:      cmd.Bool("no-stats"),
 			})
 		},
 	}
@@ -130,14 +127,9 @@ type runConfig struct {
 	noRoutes     bool
 	noDNS        bool
 	otp          string
-	noStats      bool
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
-
-	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.insecure, logger)
 	if cfg.otp != "" {
@@ -247,7 +239,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	)
 
 	// Run the data loop
-	tunnel.DisableStats = cfg.noStats
 	err = tunnel.RunDataLoop(ctx, tunDev.Read, tunDev.Write)
 	if err != nil && ctx.Err() != nil {
 		// Clean shutdown via signal
