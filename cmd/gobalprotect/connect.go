@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	cli "github.com/urfave/cli/v3"
+	"golang.org/x/term"
 
 	"github.com/floj/gobalprotect/pkg/gpst"
 	"github.com/floj/gobalprotect/pkg/tun"
@@ -118,12 +119,40 @@ func connectCommand() *cli.Command {
 			ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			username := cmd.String("username")
+			password := cmd.String("password")
+			cookieName := cmd.String("cookie-name")
+			cookieValue := cmd.String("cookie-value")
+
+			if cookieName == "" || cookieValue == "" {
+				if username == "" {
+					fmt.Fprint(os.Stderr, "Username: ")
+					scanner := bufio.NewScanner(os.Stdin)
+					if scanner.Scan() {
+						username = strings.TrimSpace(scanner.Text())
+					}
+					if username == "" {
+						return fmt.Errorf("either --username/--password or --cookie-name/--cookie-value is required")
+					}
+				}
+
+				if password == "" {
+					fmt.Fprint(os.Stderr, "Password: ")
+					pwBytes, err := term.ReadPassword(int(syscall.Stdin))
+					fmt.Fprintln(os.Stderr)
+					if err != nil {
+						return fmt.Errorf("reading password: %w", err)
+					}
+					password = string(pwBytes)
+				}
+			}
+
 			return run(ctx, logger, runConfig{
 				server:       cmd.String("server"),
-				username:     cmd.String("username"),
-				password:     cmd.String("password"),
-				cookieName:   cmd.String("cookie-name"),
-				cookieValue:  cmd.String("cookie-value"),
+				username:     username,
+				password:     password,
+				cookieName:   cookieName,
+				cookieValue:  cookieValue,
 				insecure:     cmd.Bool("insecure"),
 				tunName:      cmd.String("tun"),
 				defaultRoute: cmd.Bool("default-route"),
@@ -186,9 +215,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	if cfg.cookieName != "" && cfg.cookieValue != "" {
 		cookie, err = client.LoginWithCookie(cfg.cookieName, cfg.cookieValue)
 	} else {
-		if cfg.username == "" {
-			return fmt.Errorf("either -user/-passwd or -cookie-name/-cookie-value is required")
-		}
 		cookie, err = client.Login()
 	}
 	if err != nil {
