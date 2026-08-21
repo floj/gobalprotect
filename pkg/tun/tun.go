@@ -207,7 +207,7 @@ func (d *Device) configure(cfg Config) error {
 					d.logger.Warn("no IPv4 default gateway; skipping exclude IP", "ip", ip)
 					continue
 				}
-				if err := addRoute(conn, unix.AF_INET, dst4, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst4, Gateway: gw4}); err != nil {
+				if err := addRoute(conn, unix.AF_INET, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst4, Gateway: gw4}); err != nil {
 					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw4, "error", err)
 				} else {
 					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw4)
@@ -218,7 +218,7 @@ func (d *Device) configure(cfg Config) error {
 					d.logger.Warn("no IPv6 default gateway; skipping exclude IP", "ip", ip)
 					continue
 				}
-				if err := addRoute(conn, unix.AF_INET6, dst, 128, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst, Gateway: gw6, OutIface: gw6Iface}); err != nil {
+				if err := addRoute(conn, unix.AF_INET6, 128, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: dst, Gateway: gw6, OutIface: gw6Iface}); err != nil {
 					d.logger.Warn("failed to add exclusion route", "ip", ip, "via", gw6, "error", err)
 				} else {
 					d.logger.Info("added exclusion route for VPN server", "ip", ip, "via", gw6)
@@ -263,7 +263,7 @@ func (d *Device) configure(cfg Config) error {
 				family = unix.AF_INET6
 			}
 		}
-		if err := addRoute(conn, family, dst, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
+		if err := addRoute(conn, family, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
 			d.logger.Warn("failed to add route", "route", route, "error", err)
 		} else {
 			d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: dst, prefixLen: prefixLen})
@@ -290,7 +290,9 @@ func (d *Device) configureDNS(servers []string) {
 
 	var input strings.Builder
 	for _, s := range servers {
-		input.WriteString("nameserver " + s + "\n")
+		input.WriteString("nameserver ")
+		input.WriteString(s)
+		input.WriteString("\n")
 	}
 
 	cmd := exec.Command(resolvconf, "-a", d.name, "-m", "0", "-x")
@@ -329,7 +331,7 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 	if gw, _ := detectDefaultGateway(conn, unix.AF_INET); gw != nil {
 		serverIP := net.ParseIP(gatewayIP).To4()
 		if serverIP != nil {
-			if err := addRoute(conn, unix.AF_INET, serverIP, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: serverIP, Gateway: gw}); err != nil {
+			if err := addRoute(conn, unix.AF_INET, 32, unix.RT_SCOPE_UNIVERSE, rtnetlink.RouteAttributes{Dst: serverIP, Gateway: gw}); err != nil {
 				d.logger.Warn("failed to add host route to VPN server", "error", err)
 			}
 		}
@@ -360,7 +362,7 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 
 // addRoute adds a route with the given destination prefix, scope, and attributes.
 // If the route already exists, it tries to replace it.
-func addRoute(conn *rtnetlink.Conn, family uint8, dst net.IP, prefixLen uint8, scope uint8, attrs rtnetlink.RouteAttributes) error {
+func addRoute(conn *rtnetlink.Conn, family, prefixLen, scope uint8, attrs rtnetlink.RouteAttributes) error {
 	msg := &rtnetlink.RouteMessage{
 		Family:     family,
 		DstLength:  prefixLen,
