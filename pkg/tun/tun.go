@@ -29,6 +29,7 @@ type Config struct {
 	Netmask    string // e.g. "255.255.255.255"
 	MTU        int
 	DNS        []string
+	DNSDomains []string // domains to route to VPN DNS (e.g. "~example.com")
 	Routes     []string // CIDR routes to add, e.g. "10.0.0.0/8"
 	ExcludeIPs []string // IPs to route via existing default gateway (e.g. VPN server)
 }
@@ -279,46 +280,57 @@ func (d *Device) configure(cfg Config) error {
 		}
 	}
 
-	// Configure DNS via resolvconf if available
+	// Configure DNS via systemd-resolved (resolvectl) if available
 	if len(cfg.DNS) > 0 {
-		d.configureDNS(cfg.DNS)
+		d.configureDNS(cfg.DNS, cfg.DNSDomains)
 	}
 
 	return nil
 }
 
-func (d *Device) configureDNS(servers []string) {
-	// Try resolvconf first
-	resolvconf, err := exec.LookPath("resolvconf")
+func (d *Device) configureDNS(servers, domains []string) {
+	resolvectl, err := exec.LookPath("resolvectl")
 	if err != nil {
-		d.logger.Warn("resolvconf not found; DNS not configured automatically", "dns", servers)
+		d.logger.Warn("resolvectl not found; DNS not configured automatically", "dns", servers)
 		d.logger.Info("configure DNS manually", "servers", servers)
 		return
 	}
 
-	var input strings.Builder
-	for _, s := range servers {
-		input.WriteString("nameserver ")
-		input.WriteString(s)
-		input.WriteString("\n")
-	}
-
-	cmd := exec.Command(resolvconf, "-a", d.name, "-m", "0", "-x")
-	cmd.Stdin = strings.NewReader(input.String())
-	if err := cmd.Run(); err != nil {
-		d.logger.Warn("resolvconf failed", "error", err)
+	// Set DNS servers for the interface
+	args := append([]string{"dns", d.name}, servers...)
+	if out, err := exec.Command(resolvectl, args...).CombinedOutput(); err != nil {
+		d.logger.Warn("resolvectl dns failed", "error", err, "output", strings.TrimSpace(string(out)))
 		return
 	}
-	d.logger.Info("DNS configured via resolvconf", "servers", servers)
+	d.logger.Info("DNS servers configured via resolvectl", "iface", d.name, "servers", servers)
+
+	// Set DNS routing domains for the interface
+	if len(domains) > 0 {
+		// Prefix domains with ~ to make them routing domains (not search domains)
+		routing := make([]string, len(domains))
+		for i, dom := range domains {
+			dom = strings.TrimPrefix(dom, "*.")
+			if !strings.HasPrefix(dom, "~") {
+				dom = "~" + dom
+			}
+			routing[i] = dom
+		}
+		args = append([]string{"domain", d.name}, routing...)
+		if out, err := exec.Command(resolvectl, args...).CombinedOutput(); err != nil {
+			d.logger.Warn("resolvectl domain failed", "error", err, "output", strings.TrimSpace(string(out)))
+		} else {
+			d.logger.Info("DNS domains configured via resolvectl", "iface", d.name, "domains", routing)
+		}
+	}
 }
 
 // RemoveDNS removes DNS configuration added by this device.
 func (d *Device) RemoveDNS() {
-	resolvconf, err := exec.LookPath("resolvconf")
+	resolvectl, err := exec.LookPath("resolvectl")
 	if err != nil {
 		return
 	}
-	exec.Command(resolvconf, "-d", d.name).Run()
+	exec.Command(resolvectl, "revert", d.name).Run()
 }
 
 // AddDefaultRoute adds a default route through the TUN device,

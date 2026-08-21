@@ -428,6 +428,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	}
 	if !cfg.noDNS {
 		tunCfg.DNS = vpnConfig.DNS
+		tunCfg.DNSDomains = vpnConfig.SplitDomains
 	}
 
 	tunDev, err := tun.New(tunCfg, logger)
