@@ -1,4 +1,4 @@
-package vpndns
+package splitdns
 
 import (
 	"bufio"
@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"codeberg.org/miekg/dns"
+	cache "github.com/go-pkgz/expirable-cache/v3"
 )
 
 // RouteAdder is called with resolved IPs from split-domain DNS queries
@@ -27,13 +29,15 @@ type Server struct {
 	logger        *slog.Logger
 	server        *dns.Server
 	routeAdder    RouteAdder
+	cache         dnsCache
 }
 
 // NewServer creates a new DNS server.
 // vpnDNS are the DNS servers from the VPN config.
 // splitDomains are the include-split-tunneling-domain patterns (supports leading wildcard like *.example.com).
 // routeAdder, if non-nil, is called for each resolved IP from split-domain queries to add VPN routes.
-func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger *slog.Logger, routeAdder RouteAdder) (*Server, error) {
+// cacheSize sets the maximum number of cached DNS responses (0 disables caching).
+func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger *slog.Logger, routeAdder RouteAdder, cacheSize int) (*Server, error) {
 	systemDNS, err := readResolvConf()
 	if err != nil {
 		return nil, fmt.Errorf("reading resolv.conf: %w", err)
@@ -44,6 +48,11 @@ func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger
 
 	matcher := NewDomainMatcher(splitDomains)
 
+	var c dnsCache = noopCache{}
+	if cacheSize > 0 {
+		c = &lruCache{cache.NewCache[cacheKey, *dns.Msg]().WithMaxKeys(cacheSize).WithLRU()}
+	}
+
 	return &Server{
 		listenAddr:    listenAddr,
 		vpnDNS:        vpnDNS,
@@ -51,6 +60,7 @@ func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger
 		domainMatcher: matcher,
 		logger:        logger,
 		routeAdder:    routeAdder,
+		cache:         c,
 	}, nil
 }
 
@@ -96,6 +106,17 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		s.logger.Debug("dns query not matched, using system DNS", "name", name, "upstream", upstream)
 	}
 
+	// Check cache
+	qtype := dns.RRToType(r.Question[0])
+	ck := cacheKey{name: qname, qtype: qtype}
+	if cached, ok := s.cache.Get(ck); ok {
+		s.logger.Debug("dns cache hit", "name", name, "type", qtype)
+		resp := cached.Copy()
+		resp.ID = r.ID
+		resp.WriteTo(w)
+		return
+	}
+
 	resp, err := s.forward(r, upstream)
 	if err != nil {
 		s.logger.Warn("dns forward failed", "name", name, "error", err)
@@ -105,6 +126,12 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		fail.Rcode = dns.RcodeServerFailure
 		fail.WriteTo(w)
 		return
+	}
+
+	// Cache the response using the minimum TTL from the answer
+	if ttl := minTTL(resp); ttl > 0 {
+		s.cache.Set(ck, resp.Copy(), ttl)
+		s.logger.Debug("dns cache store", "name", name, "type", qtype, "ttl", ttl)
 	}
 
 	// Add routes for resolved IPs from split-domain queries
@@ -146,6 +173,20 @@ func (s *Server) forward(r *dns.Msg, upstreams []string) (*dns.Msg, error) {
 		return resp, nil
 	}
 	return nil, fmt.Errorf("all upstream DNS servers failed: %w", lastErr)
+}
+
+// minTTL returns the minimum TTL from all resource records in the response.
+func minTTL(msg *dns.Msg) time.Duration {
+	var min uint32
+	for _, sections := range [][]dns.RR{msg.Answer, msg.Ns, msg.Extra} {
+		for _, rr := range sections {
+			ttl := rr.Header().TTL
+			if min == 0 || ttl < min {
+				min = ttl
+			}
+		}
+	}
+	return time.Duration(min) * time.Second
 }
 
 func ensurePort(addr, defaultPort string) string {

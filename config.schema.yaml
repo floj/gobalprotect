@@ -59,6 +59,10 @@ properties:
         computer:
           type: string
           description: Computer name to report to the gateway.
+        dns_cache_size:
+          type: integer
+          description: Maximum number of cached DNS responses (0 to disable, default 256).
+          default: 256
       required:
         - name
         - server

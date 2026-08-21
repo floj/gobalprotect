@@ -17,8 +17,8 @@ import (
 	"github.com/manifoldco/promptui"
 	cli "github.com/urfave/cli/v3"
 
-	vpndns "github.com/floj/gobalprotect/pkg/dns"
 	"github.com/floj/gobalprotect/pkg/gpst"
+	"github.com/floj/gobalprotect/pkg/splitdns"
 	"github.com/floj/gobalprotect/pkg/tun"
 )
 
@@ -130,6 +130,12 @@ func connectCommand() *cli.Command {
 				Usage:   "Start a local DNS server on the given address (e.g. 127.0.0.1:1553). Matches split-tunneling domains via VPN DNS, forwards the rest to system resolv.conf",
 				Sources: cli.EnvVars("GP_SERVE_DNS"),
 			},
+			&cli.IntFlag{
+				Name:    "dns-cache-size",
+				Usage:   "Maximum number of cached DNS responses (0 to disable)",
+				Value:   512,
+				Sources: cli.EnvVars("GP_DNS_CACHE_SIZE"),
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			// Load config file as base, flags/env override
@@ -231,6 +237,7 @@ func connectCommand() *cli.Command {
 				otp:            otp,
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
 				serveDNS:       coalesce(cmd.String("serve-dns"), fileCfg.ServeDNS),
+				dnsCacheSize:   coalesceInt(cmd.Int("dns-cache-size"), fileCfg.DNSCacheSize),
 			})
 		},
 	}
@@ -250,6 +257,7 @@ type runConfig struct {
 	otp            string
 	computer       string
 	serveDNS       string
+	dnsCacheSize   int
 }
 
 type configFile struct {
@@ -273,6 +281,7 @@ type tunnelConfig struct {
 	OTPCmd         string `yaml:"otp_cmd"`
 	Computer       string `yaml:"computer"`
 	ServeDNS       string `yaml:"serve_dns"`
+	DNSCacheSize   int    `yaml:"dns_cache_size"`
 }
 
 func loadConfigFile(path string, profile string) (tunnelConfig, error) {
@@ -333,6 +342,15 @@ func coalesce(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func coalesceInt(values ...int) int {
+	for _, v := range values {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func runShellCmd(ctx context.Context, command string) (string, error) {
@@ -444,7 +462,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Start DNS server if requested
 	if cfg.serveDNS != "" {
-		dnsServer, err := vpndns.NewServer(cfg.serveDNS, vpnConfig.DNS, vpnConfig.SplitDomains, logger, tunDev.AddRoute)
+		dnsServer, err := splitdns.NewServer(cfg.serveDNS, vpnConfig.DNS, vpnConfig.SplitDomains, logger, tunDev.AddRoute, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}

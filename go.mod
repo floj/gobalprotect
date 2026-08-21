@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	codeberg.org/miekg/dns v0.6.101
 	github.com/dop251/goja v0.0.0-20260806115107-493f22071ef6
+	github.com/go-pkgz/expirable-cache/v3 v3.1.1
 	github.com/goccy/go-yaml v1.19.2
 	github.com/jsimonetti/rtnetlink v1.4.2
 	github.com/manifoldco/promptui v0.9.0
