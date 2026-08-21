@@ -11,9 +11,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dop251/goja"
 )
+
+const maxResponseSize = 10 * 1024 * 1024 // 10 MB
 
 // PreloginResponse represents the server's prelogin response.
 type PreloginResponse struct {
@@ -115,7 +118,7 @@ func (c *Client) Prelogin() (*PreloginResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading prelogin response: %w", err)
 	}
@@ -180,7 +183,7 @@ func (c *Client) Login() (*AuthCookie, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading login response: %w", err)
 	}
@@ -248,7 +251,7 @@ func (c *Client) handleChallenge(ch *challenge) (*AuthCookie, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading challenge login response: %w", err)
 	}
@@ -303,7 +306,7 @@ func (c *Client) LoginWithCookie(cookieName, cookieValue string) (*AuthCookie, e
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading login response: %w", err)
 	}
@@ -426,7 +429,7 @@ func (c *Client) Logout(cookie *AuthCookie) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("reading logout response: %w", err)
 	}
@@ -474,6 +477,11 @@ func parseJavaScriptChallenge(body []byte) (*challenge, bool) {
 
 	vm := goja.New()
 
+	// Set a 10-second timeout to prevent malicious scripts from hanging
+	timer := time.AfterFunc(10*time.Second, func() {
+		vm.Interrupt("execution timeout")
+	})
+	defer timer.Stop()
 	// Provide the thisForm.inputStr stub that the script writes to
 	_, _ = vm.RunString(`var thisForm = { inputStr: {} };`)
 

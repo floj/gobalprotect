@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const maxConfigResponseSize = 10 * 1024 * 1024 // 10 MB
+
 // VPNConfig holds the VPN configuration received from the gateway.
 type VPNConfig struct {
 	IPAddress   string
@@ -92,7 +94,7 @@ func (c *Client) GetConfig(cookie *AuthCookie) (*VPNConfig, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConfigResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading getconfig response: %w", err)
 	}

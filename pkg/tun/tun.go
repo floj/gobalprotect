@@ -14,9 +14,10 @@ import (
 
 // Device represents a TUN network device.
 type Device struct {
-	iface  *water.Interface
-	name   string
-	logger *slog.Logger
+	iface       *water.Interface
+	name        string
+	logger      *slog.Logger
+	addedRoutes []addedRoute
 }
 
 // Config holds the TUN device configuration.
@@ -28,6 +29,13 @@ type Config struct {
 	DNS        []string
 	Routes     []string // CIDR routes to add, e.g. "10.0.0.0/8"
 	ExcludeIPs []string // IPs to route via existing default gateway (e.g. VPN server)
+}
+
+// addedRoute tracks a route added by this device for cleanup.
+type addedRoute struct {
+	family    uint8
+	dst       net.IP
+	prefixLen uint8
 }
 
 // New creates and configures a new TUN device.
@@ -79,6 +87,39 @@ func (d *Device) Read() ([]byte, error) {
 func (d *Device) Write(data []byte) error {
 	_, err := d.iface.Write(data)
 	return err
+}
+
+// RemoveRoutes removes all routes added by this device.
+func (d *Device) RemoveRoutes() {
+	if len(d.addedRoutes) == 0 {
+		return
+	}
+
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		d.logger.Warn("failed to dial rtnetlink for route cleanup", "error", err)
+		return
+	}
+	defer conn.Close()
+
+	for _, r := range d.addedRoutes {
+		msg := &rtnetlink.RouteMessage{
+			Family:    r.family,
+			DstLength: r.prefixLen,
+			Table:     unix.RT_TABLE_MAIN,
+			Protocol:  unix.RTPROT_STATIC,
+			Scope:     unix.RT_SCOPE_LINK,
+			Type:      unix.RTN_UNICAST,
+			Attributes: rtnetlink.RouteAttributes{
+				Dst: r.dst,
+			},
+		}
+		if err := conn.Route.Delete(msg); err != nil {
+			d.logger.Warn("failed to remove route", "dst", r.dst, "error", err)
+		} else {
+			d.logger.Debug("removed route", "dst", r.dst, "prefix", r.prefixLen)
+		}
+	}
 }
 
 // Close closes the TUN device.
@@ -225,6 +266,7 @@ func (d *Device) configure(cfg Config) error {
 		if err := addRoute(conn, family, dst, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
 			d.logger.Warn("failed to add route", "route", route, "error", err)
 		} else {
+			d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: dst, prefixLen: prefixLen})
 			d.logger.Info("added route", "route", route)
 		}
 	}

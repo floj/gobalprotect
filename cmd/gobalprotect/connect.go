@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -343,7 +344,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {
-		otpUsed := false
+		var otpUsed atomic.Bool
 		client.InputCallback = otpInputCallback(logger, cfg.otp, &otpUsed)
 	} else {
 		client.InputCallback = interactiveInputCallback(ctx)
@@ -404,6 +405,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		return fmt.Errorf("creating TUN device: %w", err)
 	}
 	defer func() {
+		tunDev.RemoveRoutes()
 		tunDev.RemoveDNS()
 		tunDev.Close()
 	}()
@@ -451,12 +453,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	return err
 }
 
-func otpInputCallback(logger *slog.Logger, otp string, used *bool) func(string) (string, error) {
+func otpInputCallback(logger *slog.Logger, otp string, used *atomic.Bool) func(string) (string, error) {
 	return func(prompt string) (string, error) {
-		if *used {
+		if !used.CompareAndSwap(false, true) {
 			return "", fmt.Errorf("OTP already used, but server requested another challenge: %s", prompt)
 		}
-		*used = true
 		logger.Info("using OTP from command line", "prompt", prompt, "otp", otp)
 		return otp, nil
 	}
