@@ -405,7 +405,6 @@ func (d *Device) AddRoute(ip net.IP) error {
 		}
 		mask := net.CIDRMask(int(r.prefixLen), len(r.dst)*8)
 		if r.dst.Mask(mask).Equal(ip.Mask(mask)) {
-			d.mu.Unlock()
 			return nil
 		}
 	}
