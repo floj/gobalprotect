@@ -73,16 +73,17 @@ func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns
 	origID := r.ID
 
 	qname := r.Question[0].Header().Name
+	qtype := dns.RRToType(r.Question[0])
+
 	// dns names have trailing dot, strip it for matching
 	name := strings.TrimSuffix(qname, ".")
+	reqType := dns.TypeToString[qtype]
 
-	s.logger.Debug("dns query, using VPN DNS", "name", name, "upstream", s.vpnDNS)
+	s.logger.Debug("dns query", "name", name, "type", reqType, "upstream", s.vpnDNS)
 
-	// Check cache
-	qtype := dns.RRToType(r.Question[0])
 	ck := cacheKey{name: qname, qtype: qtype}
 	if cached, ok := s.cache.Get(ck); ok {
-		s.logger.Debug("dns cache hit", "name", name, "type", qtype)
+		s.logger.Debug("dns cache hit", "name", name, "type", reqType)
 		resp := cached.Copy()
 		resp.ID = r.ID
 		resp.Data = nil
@@ -105,7 +106,7 @@ func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns
 	// Cache the response using the minimum TTL from the answer
 	if ttl := minTTL(resp); ttl > 0 {
 		s.cache.Set(ck, resp.Copy(), ttl)
-		s.logger.Debug("dns cache store", "name", name, "type", qtype, "ttl", ttl)
+		s.logger.Debug("dns cache store", "name", name, "type", reqType, "ttl", ttl)
 	}
 
 	// Add routes for resolved IPs
