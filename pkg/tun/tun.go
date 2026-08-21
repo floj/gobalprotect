@@ -375,9 +375,13 @@ func (d *Device) AddRoute(ip net.IP) error {
 		prefixLen = 128
 	}
 
-	// Check if we already track this route
+	// Check if we already track a route that covers this IP
 	for _, r := range d.addedRoutes {
-		if r.family == family && r.prefixLen == prefixLen && r.dst.Equal(ip) {
+		if r.family != family {
+			continue
+		}
+		mask := net.CIDRMask(int(r.prefixLen), len(r.dst)*8)
+		if r.dst.Mask(mask).Equal(ip.Mask(mask)) {
 			return nil
 		}
 	}
