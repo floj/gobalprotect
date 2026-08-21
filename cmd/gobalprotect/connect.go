@@ -466,6 +466,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}
+		for _, domain := range vpnConfig.SplitDomains {
+			logger.Debug("DNS split domain", "domain", domain)
+		}
 		go func() {
 			if err := dnsServer.ListenAndServe(); err != nil {
 				logger.Error("DNS server failed", "error", err)
@@ -476,9 +479,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		}()
 		defer dnsServer.Shutdown(ctx)
 		logger.Info("DNS server started", "addr", cfg.serveDNS)
-		for _, domain := range vpnConfig.SplitDomains {
-			logger.Debug("DNS split domain", "domain", domain)
-		}
 	}
 	go func() {
 		<-ctx.Done()
