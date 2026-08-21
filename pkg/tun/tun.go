@@ -360,6 +360,48 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 	return nil
 }
 
+// AddRoute adds a host route for the given IP through the TUN device.
+// It is safe to call concurrently. If the route already exists, it is a no-op.
+func (d *Device) AddRoute(ip net.IP) error {
+	var family uint8
+	var prefixLen uint8
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+		family = unix.AF_INET
+		prefixLen = 32
+	} else {
+		ip = ip.To16()
+		family = unix.AF_INET6
+		prefixLen = 128
+	}
+
+	// Check if we already track this route
+	for _, r := range d.addedRoutes {
+		if r.family == family && r.prefixLen == prefixLen && r.dst.Equal(ip) {
+			return nil
+		}
+	}
+
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		return fmt.Errorf("dialing rtnetlink: %w", err)
+	}
+	defer conn.Close()
+
+	ifIndex, err := d.ifaceIndex()
+	if err != nil {
+		return err
+	}
+
+	if err := addRoute(conn, family, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: ip, OutIface: ifIndex}); err != nil {
+		return err
+	}
+
+	d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: ip, prefixLen: prefixLen})
+	d.logger.Info("added dynamic route for DNS result", "ip", ip, "prefix", prefixLen)
+	return nil
+}
+
 // addRoute adds a route with the given destination prefix, scope, and attributes.
 // If the route already exists, it tries to replace it.
 func addRoute(conn *rtnetlink.Conn, family, prefixLen, scope uint8, attrs rtnetlink.RouteAttributes) error {

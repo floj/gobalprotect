@@ -13,6 +13,10 @@ import (
 	"codeberg.org/miekg/dns"
 )
 
+// RouteAdder is called with resolved IPs from split-domain DNS queries
+// to dynamically add routes through the VPN tunnel.
+type RouteAdder func(ip net.IP) error
+
 // Server is a DNS proxy that resolves matching domains via VPN DNS servers
 // and forwards everything else to the system's resolv.conf DNS servers.
 type Server struct {
@@ -22,12 +26,14 @@ type Server struct {
 	domainMatcher *DomainMatcher
 	logger        *slog.Logger
 	server        *dns.Server
+	routeAdder    RouteAdder
 }
 
 // NewServer creates a new DNS server.
 // vpnDNS are the DNS servers from the VPN config.
 // splitDomains are the include-split-tunneling-domain patterns (supports leading wildcard like *.example.com).
-func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger *slog.Logger) (*Server, error) {
+// routeAdder, if non-nil, is called for each resolved IP from split-domain queries to add VPN routes.
+func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger *slog.Logger, routeAdder RouteAdder) (*Server, error) {
 	systemDNS, err := readResolvConf()
 	if err != nil {
 		return nil, fmt.Errorf("reading resolv.conf: %w", err)
@@ -44,6 +50,7 @@ func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger
 		systemDNS:     systemDNS,
 		domainMatcher: matcher,
 		logger:        logger,
+		routeAdder:    routeAdder,
 	}, nil
 }
 
@@ -80,7 +87,8 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 	name := strings.TrimSuffix(qname, ".")
 
 	var upstream []string
-	if s.domainMatcher.Matches(name) {
+	matched := s.domainMatcher.Matches(name)
+	if matched {
 		upstream = s.vpnDNS
 		s.logger.Debug("dns query matched split domain, using VPN DNS", "name", name, "upstream", upstream)
 	} else {
@@ -99,8 +107,30 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		return
 	}
 
+	// Add routes for resolved IPs from split-domain queries
+	if matched && s.routeAdder != nil {
+		s.addRoutesFromResponse(resp, name)
+	}
+
 	resp.ID = r.ID
 	resp.WriteTo(w)
+}
+
+func (s *Server) addRoutesFromResponse(resp *dns.Msg, name string) {
+	for _, rr := range resp.Answer {
+		var ip net.IP
+		switch v := rr.(type) {
+		case *dns.A:
+			ip = v.Addr.AsSlice()
+		case *dns.AAAA:
+			ip = v.Addr.AsSlice()
+		default:
+			continue
+		}
+		if err := s.routeAdder(ip); err != nil {
+			s.logger.Warn("failed to add route for DNS result", "name", name, "ip", ip, "error", err)
+		}
+	}
 }
 
 func (s *Server) forward(r *dns.Msg, upstreams []string) (*dns.Msg, error) {
