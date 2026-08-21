@@ -83,11 +83,6 @@ func (s *Server) Shutdown(ctx context.Context) {
 }
 
 func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
-	if err := r.Unpack(); err != nil {
-		s.logger.Warn("dns unpack failed", "error", err)
-		return
-	}
-
 	if len(r.Question) == 0 {
 		return
 	}
@@ -113,6 +108,7 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		s.logger.Debug("dns cache hit", "name", name, "type", qtype)
 		resp := cached.Copy()
 		resp.ID = r.ID
+		resp.Data = nil
 		resp.WriteTo(w)
 		return
 	}
@@ -124,6 +120,7 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		fail := r.Copy()
 		fail.Response = true
 		fail.Rcode = dns.RcodeServerFailure
+		fail.Data = nil
 		fail.WriteTo(w)
 		return
 	}
@@ -140,6 +137,7 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 	}
 
 	resp.ID = r.ID
+	resp.Data = nil
 	resp.WriteTo(w)
 }
 
