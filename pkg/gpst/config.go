@@ -26,6 +26,7 @@ type VPNConfig struct {
 
 	SplitIncludes []string
 	SplitExcludes []string
+	SplitDomains  []string
 }
 
 // configResponse is used for XML parsing of the getconfig response.
@@ -50,6 +51,9 @@ type configResponse struct {
 	ExcludeRoutes struct {
 		Members []string `xml:"member"`
 	} `xml:"exclude-access-routes"`
+	IncludeSplitDomains struct {
+		Members []string `xml:"member"`
+	} `xml:"include-split-tunneling-domain"`
 }
 
 type dnsBlock struct {
@@ -139,6 +143,7 @@ func parseConfigResponse(body []byte) (*VPNConfig, error) {
 		Timeout:       cr.Timeout,
 		SplitIncludes: cr.AccessRoutes.Members,
 		SplitExcludes: cr.ExcludeRoutes.Members,
+		SplitDomains:  cr.IncludeSplitDomains.Members,
 	}
 
 	if cfg.TunnelURL == "" {

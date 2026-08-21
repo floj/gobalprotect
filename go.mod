@@ -3,6 +3,7 @@ module github.com/floj/gobalprotect
 go 1.26.6
 
 require (
+	codeberg.org/miekg/dns v0.6.101
 	github.com/dop251/goja v0.0.0-20260806115107-493f22071ef6
 	github.com/goccy/go-yaml v1.19.2
 	github.com/jsimonetti/rtnetlink v1.4.2
@@ -21,7 +22,8 @@ require (
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.4.1 // indirect
-	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/net v0.51.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 )

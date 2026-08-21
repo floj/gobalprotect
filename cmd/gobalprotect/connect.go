@@ -17,6 +17,7 @@ import (
 	"github.com/manifoldco/promptui"
 	cli "github.com/urfave/cli/v3"
 
+	vpndns "github.com/floj/gobalprotect/pkg/dns"
 	"github.com/floj/gobalprotect/pkg/gpst"
 	"github.com/floj/gobalprotect/pkg/tun"
 )
@@ -124,6 +125,11 @@ func connectCommand() *cli.Command {
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
 			},
+			&cli.StringFlag{
+				Name:    "serve-dns",
+				Usage:   "Start a local DNS server on the given address (e.g. 127.0.0.1:1553). Matches split-tunneling domains via VPN DNS, forwards the rest to system resolv.conf",
+				Sources: cli.EnvVars("GP_SERVE_DNS"),
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			// Load config file as base, flags/env override
@@ -224,6 +230,7 @@ func connectCommand() *cli.Command {
 				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
 				otp:            otp,
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
+				serveDNS:       coalesce(cmd.String("serve-dns"), fileCfg.ServeDNS),
 			})
 		},
 	}
@@ -242,6 +249,7 @@ type runConfig struct {
 	noDNS          bool
 	otp            string
 	computer       string
+	serveDNS       string
 }
 
 type configFile struct {
@@ -264,6 +272,7 @@ type tunnelConfig struct {
 	NoDNS          bool   `yaml:"no_dns"`
 	OTPCmd         string `yaml:"otp_cmd"`
 	Computer       string `yaml:"computer"`
+	ServeDNS       string `yaml:"serve_dns"`
 }
 
 func loadConfigFile(path string, profile string) (tunnelConfig, error) {
@@ -341,6 +350,9 @@ func runShellCmd(ctx context.Context, command string) (string, error) {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	if cfg.otp != "" {
@@ -430,6 +442,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		"dns", strings.Join(vpnConfig.DNS, ", "),
 	)
 
+	// Start DNS server if requested
+	if cfg.serveDNS != "" {
+		dnsServer, err := vpndns.NewServer(cfg.serveDNS, vpnConfig.DNS, vpnConfig.SplitDomains, logger)
+		if err != nil {
+			return fmt.Errorf("creating DNS server: %w", err)
+		}
+		go func() {
+			if err := dnsServer.ListenAndServe(); err != nil {
+				logger.Error("DNS server failed", "error", err)
+				cancel()
+				return
+			}
+			logger.Info("DNS server stopped")
+		}()
+		defer dnsServer.Shutdown(ctx)
+		logger.Info("DNS server started", "addr", cfg.serveDNS)
+		for _, domain := range vpnConfig.SplitDomains {
+			logger.Debug("DNS split domain", "domain", domain)
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		logger.Info("closing tunnel and shutting down gracefully")
