@@ -125,10 +125,16 @@ func connectCommand() *cli.Command {
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
 			},
-			&cli.StringFlag{
-				Name:    "serve-dns",
-				Usage:   "Start a local DNS server on the given address (e.g. 127.0.0.1:1553). Matches split-tunneling domains via VPN DNS, forwards the rest to system resolv.conf",
-				Sources: cli.EnvVars("GP_SERVE_DNS"),
+			&cli.BoolFlag{
+				Name:    "no-serve-dns",
+				Usage:   "Don't start a local DNS server for split-tunneling domains",
+				Sources: cli.EnvVars("GP_NO_SERVE_DNS"),
+			},
+			&cli.IntFlag{
+				Name:    "serve-dns-port",
+				Usage:   "Port for the local DNS server",
+				Value:   1553,
+				Sources: cli.EnvVars("GP_SERVE_DNS_PORT"),
 			},
 			&cli.IntFlag{
 				Name:    "dns-cache-size",
@@ -236,7 +242,8 @@ func connectCommand() *cli.Command {
 				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
 				otp:            otp,
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
-				serveDNS:       coalesce(cmd.String("serve-dns"), fileCfg.ServeDNS),
+				noServeDNS:     cmd.Bool("no-serve-dns") || fileCfg.NoServeDNS,
+				serveDNSPort:   coalesceInt(cmd.Int("serve-dns-port"), fileCfg.ServeDNSPort),
 				dnsCacheSize:   coalesceInt(cmd.Int("dns-cache-size"), fileCfg.DNSCacheSize),
 			})
 		},
@@ -256,7 +263,8 @@ type runConfig struct {
 	noDNS          bool
 	otp            string
 	computer       string
-	serveDNS       string
+	noServeDNS     bool
+	serveDNSPort   int
 	dnsCacheSize   int
 }
 
@@ -280,7 +288,8 @@ type tunnelConfig struct {
 	NoDNS          bool   `yaml:"no_dns"`
 	OTPCmd         string `yaml:"otp_cmd"`
 	Computer       string `yaml:"computer"`
-	ServeDNS       string `yaml:"serve_dns"`
+	NoServeDNS     bool   `yaml:"no_serve_dns"`
+	ServeDNSPort   int    `yaml:"serve_dns_port"`
 	DNSCacheSize   int    `yaml:"dns_cache_size"`
 }
 
@@ -427,10 +436,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		tunCfg.Routes = vpnConfig.SplitIncludes
 	}
 	if !cfg.noDNS {
-		if cfg.serveDNS != "" {
-			// Use the local DNS server address instead of VPN DNS
-			tunCfg.DNS = []string{cfg.serveDNS}
-		} else {
+		tunCfg.DNS = []string{fmt.Sprintf("127.0.0.1:%d", cfg.serveDNSPort)}
+		if cfg.noServeDNS {
 			tunCfg.DNS = vpnConfig.DNS
 		}
 		tunCfg.DNSDomains = vpnConfig.SplitDomains
@@ -466,9 +473,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		"dns", strings.Join(vpnConfig.DNS, ", "),
 	)
 
-	// Start DNS server if requested
-	if cfg.serveDNS != "" {
-		dnsServer, err := splitdns.NewServer(cfg.serveDNS, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
+	// Start DNS server unless disabled
+	if !cfg.noServeDNS {
+		serveDNSAddr := fmt.Sprintf("127.0.0.1:%d", cfg.serveDNSPort)
+		dnsServer, err := splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}
@@ -484,7 +492,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 			logger.Info("DNS server stopped")
 		}()
 		defer dnsServer.Shutdown(ctx)
-		logger.Info("DNS server started", "addr", cfg.serveDNS)
+		logger.Info("DNS server started", "addr", serveDNSAddr)
 	}
 	go func() {
 		<-ctx.Done()

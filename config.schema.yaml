@@ -59,6 +59,14 @@ properties:
         computer:
           type: string
           description: Computer name to report to the gateway.
+        no_serve_dns:
+          type: boolean
+          description: Don't start a local DNS server for split-tunneling domains.
+          default: false
+        serve_dns_port:
+          type: integer
+          description: Port for the local DNS server.
+          default: 1553
         dns_cache_size:
           type: integer
           description: Maximum number of cached DNS responses (0 to disable, default 256).
