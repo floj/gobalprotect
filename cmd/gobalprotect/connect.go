@@ -427,7 +427,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		tunCfg.Routes = vpnConfig.SplitIncludes
 	}
 	if !cfg.noDNS {
-		tunCfg.DNS = vpnConfig.DNS
+		if cfg.serveDNS != "" {
+			// Use the local DNS server address instead of VPN DNS
+			tunCfg.DNS = []string{cfg.serveDNS}
+		} else {
+			tunCfg.DNS = vpnConfig.DNS
+		}
 		tunCfg.DNSDomains = vpnConfig.SplitDomains
 	}
 
