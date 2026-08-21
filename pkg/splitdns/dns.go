@@ -22,6 +22,7 @@ type Server struct {
 	vpnDNS     []string
 	logger     *slog.Logger
 	server     *dns.Server
+	client     *dns.Client
 	routeAdder RouteAdder
 	cache      dnsCache
 }
@@ -40,6 +41,7 @@ func NewServer(listenAddr string, vpnDNS []string, logger *slog.Logger, routeAdd
 		listenAddr: listenAddr,
 		vpnDNS:     vpnDNS,
 		logger:     logger,
+		client:     dns.NewClient(),
 		routeAdder: routeAdder,
 		cache:      c,
 	}, nil
@@ -134,11 +136,10 @@ func (s *Server) addRoutesFromResponse(resp *dns.Msg, name string) {
 }
 
 func (s *Server) forward(ctx context.Context, r *dns.Msg, upstreams []string) (*dns.Msg, error) {
-	c := dns.NewClient()
 	var lastErr error
 	for _, srv := range upstreams {
 		addr := ensurePort(srv, "53")
-		resp, _, err := c.Exchange(ctx, r, "udp", addr)
+		resp, _, err := s.client.Exchange(ctx, r, "udp", addr)
 		if err != nil {
 			lastErr = err
 			continue
