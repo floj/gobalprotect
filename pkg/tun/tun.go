@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/jsimonetti/rtnetlink"
 	"github.com/songgao/water"
@@ -17,6 +18,7 @@ type Device struct {
 	iface       *water.Interface
 	name        string
 	logger      *slog.Logger
+	mu          sync.Mutex
 	addedRoutes []addedRoute
 }
 
@@ -91,6 +93,9 @@ func (d *Device) Write(data []byte) error {
 
 // RemoveRoutes removes all routes added by this device.
 func (d *Device) RemoveRoutes() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if len(d.addedRoutes) == 0 {
 		return
 	}
@@ -228,6 +233,9 @@ func (d *Device) configure(cfg Config) error {
 	}
 
 	// Add routes
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	for _, route := range cfg.Routes {
 		route = strings.TrimSpace(route)
 		if route == "" || route == "0.0.0.0/0" || route == "::/0" {
@@ -375,6 +383,9 @@ func (d *Device) AddRoute(ip net.IP) error {
 		prefixLen = 128
 	}
 
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	// Check if we already track a route that covers this IP
 	for _, r := range d.addedRoutes {
 		if r.family != family {
@@ -382,6 +393,7 @@ func (d *Device) AddRoute(ip net.IP) error {
 		}
 		mask := net.CIDRMask(int(r.prefixLen), len(r.dst)*8)
 		if r.dst.Mask(mask).Equal(ip.Mask(mask)) {
+			d.mu.Unlock()
 			return nil
 		}
 	}
