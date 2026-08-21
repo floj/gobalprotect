@@ -463,7 +463,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Start DNS server if requested
 	if cfg.serveDNS != "" {
-		dnsServer, err := splitdns.NewServer(cfg.serveDNS, vpnConfig.DNS, vpnConfig.SplitDomains, logger, tunDev.AddRoute, cfg.dnsCacheSize)
+		dnsServer, err := splitdns.NewServer(cfg.serveDNS, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}

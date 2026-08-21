@@ -1,13 +1,10 @@
 package splitdns
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,48 +16,32 @@ import (
 // to dynamically add routes through the VPN tunnel.
 type RouteAdder func(ip net.IP) error
 
-// Server is a DNS proxy that resolves matching domains via VPN DNS servers
-// and forwards everything else to the system's resolv.conf DNS servers.
+// Server is a DNS proxy that resolves all queries via VPN DNS servers.
 type Server struct {
-	listenAddr    string
-	vpnDNS        []string
-	systemDNS     []string
-	domainMatcher *DomainMatcher
-	logger        *slog.Logger
-	server        *dns.Server
-	routeAdder    RouteAdder
-	cache         dnsCache
+	listenAddr string
+	vpnDNS     []string
+	logger     *slog.Logger
+	server     *dns.Server
+	routeAdder RouteAdder
+	cache      dnsCache
 }
 
 // NewServer creates a new DNS server.
 // vpnDNS are the DNS servers from the VPN config.
-// splitDomains are the include-split-tunneling-domain patterns (supports leading wildcard like *.example.com).
-// routeAdder, if non-nil, is called for each resolved IP from split-domain queries to add VPN routes.
+// routeAdder, if non-nil, is called for each resolved IP to add VPN routes.
 // cacheSize sets the maximum number of cached DNS responses (0 disables caching).
-func NewServer(listenAddr string, vpnDNS []string, splitDomains []string, logger *slog.Logger, routeAdder RouteAdder, cacheSize int) (*Server, error) {
-	systemDNS, err := readResolvConf()
-	if err != nil {
-		return nil, fmt.Errorf("reading resolv.conf: %w", err)
-	}
-	if len(systemDNS) == 0 {
-		return nil, fmt.Errorf("no nameservers found in resolv.conf")
-	}
-
-	matcher := NewDomainMatcher(splitDomains)
-
+func NewServer(listenAddr string, vpnDNS []string, logger *slog.Logger, routeAdder RouteAdder, cacheSize int) (*Server, error) {
 	var c dnsCache = noopCache{}
 	if cacheSize > 0 {
 		c = &lruCache{cache.NewCache[cacheKey, *dns.Msg]().WithMaxKeys(cacheSize).WithLRU()}
 	}
 
 	return &Server{
-		listenAddr:    listenAddr,
-		vpnDNS:        vpnDNS,
-		systemDNS:     systemDNS,
-		domainMatcher: matcher,
-		logger:        logger,
-		routeAdder:    routeAdder,
-		cache:         c,
+		listenAddr: listenAddr,
+		vpnDNS:     vpnDNS,
+		logger:     logger,
+		routeAdder: routeAdder,
+		cache:      c,
 	}, nil
 }
 
@@ -71,7 +52,7 @@ func (s *Server) ListenAndServe() error {
 		Net:     "udp",
 		Handler: dns.HandlerFunc(s.handleRequest),
 	}
-	s.logger.Info("starting DNS server", "addr", s.listenAddr, "vpn-dns", s.vpnDNS, "system-dns", s.systemDNS)
+	s.logger.Info("starting DNS server", "addr", s.listenAddr, "vpn-dns", s.vpnDNS)
 	return s.server.ListenAndServe()
 }
 
@@ -82,24 +63,18 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 }
 
-func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
 		return
 	}
+
+	origID := r.ID
 
 	qname := r.Question[0].Header().Name
 	// dns names have trailing dot, strip it for matching
 	name := strings.TrimSuffix(qname, ".")
 
-	var upstream []string
-	matched := s.domainMatcher.Matches(name)
-	if matched {
-		upstream = s.vpnDNS
-		s.logger.Debug("dns query matched split domain, using VPN DNS", "name", name, "upstream", upstream)
-	} else {
-		upstream = s.systemDNS
-		s.logger.Debug("dns query not matched, using system DNS", "name", name, "upstream", upstream)
-	}
+	s.logger.Debug("dns query, using VPN DNS", "name", name, "upstream", s.vpnDNS)
 
 	// Check cache
 	qtype := dns.RRToType(r.Question[0])
@@ -113,7 +88,7 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		return
 	}
 
-	resp, err := s.forward(r, upstream)
+	resp, err := s.forward(ctx, r, s.vpnDNS)
 	if err != nil {
 		s.logger.Warn("dns forward failed", "name", name, "error", err)
 		// Send SERVFAIL
@@ -131,12 +106,12 @@ func (s *Server) handleRequest(_ context.Context, w dns.ResponseWriter, r *dns.M
 		s.logger.Debug("dns cache store", "name", name, "type", qtype, "ttl", ttl)
 	}
 
-	// Add routes for resolved IPs from split-domain queries
-	if matched && s.routeAdder != nil {
+	// Add routes for resolved IPs
+	if s.routeAdder != nil {
 		s.addRoutesFromResponse(resp, name)
 	}
 
-	resp.ID = r.ID
+	resp.ID = origID
 	resp.Data = nil
 	resp.WriteTo(w)
 }
@@ -158,12 +133,12 @@ func (s *Server) addRoutesFromResponse(resp *dns.Msg, name string) {
 	}
 }
 
-func (s *Server) forward(r *dns.Msg, upstreams []string) (*dns.Msg, error) {
+func (s *Server) forward(ctx context.Context, r *dns.Msg, upstreams []string) (*dns.Msg, error) {
 	c := dns.NewClient()
 	var lastErr error
 	for _, srv := range upstreams {
 		addr := ensurePort(srv, "53")
-		resp, _, err := c.Exchange(context.Background(), r, "udp", addr)
+		resp, _, err := c.Exchange(ctx, r, "udp", addr)
 		if err != nil {
 			lastErr = err
 			continue
@@ -238,37 +213,4 @@ func (m *DomainMatcher) Matches(domain string) bool {
 		}
 	}
 	return false
-}
-
-// readResolvConf reads nameservers from /etc/resolv.conf.
-func readResolvConf() ([]string, error) {
-	return readResolvConfFile("/etc/resolv.conf")
-}
-
-func readResolvConfFile(path string) ([]string, error) {
-	// Resolve symlinks to handle systemd-resolved stub
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		path = resolved
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var servers []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "#") || line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "nameserver" {
-			servers = append(servers, fields[1])
-		}
-	}
-	return servers, scanner.Err()
 }
