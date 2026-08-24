@@ -117,8 +117,10 @@ func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns
 		s.logger.Debug("dns response", "name", name, "type", reqType, "ips", ips)
 	}
 
-	// Cache the response using the minimum TTL from the answer
+	// Cache the response using the minimum TTL from the answer/authority
 	if ttl := minTTL(resp); ttl > 0 {
+		s.cache.Set(ck, resp.Copy(), ttl)
+	} else if ttl := negativeTTL(resp); ttl > 0 {
 		s.cache.Set(ck, resp.Copy(), ttl)
 	}
 
@@ -186,6 +188,20 @@ func minTTL(msg *dns.Msg) time.Duration {
 		}
 	}
 	return time.Duration(min) * time.Second
+}
+
+// negativeTTL returns the TTL for negative responses (NXDOMAIN, NODATA) from the SOA record in the authority section.
+func negativeTTL(msg *dns.Msg) time.Duration {
+	if msg.Rcode == dns.RcodeSuccess && len(msg.Answer) > 0 {
+		return 0
+	}
+	for _, rr := range msg.Ns {
+		if soa, ok := rr.(*dns.SOA); ok {
+			ttl := min(soa.Minttl, soa.Header().TTL)
+			return time.Duration(ttl) * time.Second
+		}
+	}
+	return 0
 }
 
 func ensurePort(addr, defaultPort string) string {
