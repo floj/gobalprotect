@@ -37,6 +37,12 @@ func NewServer(listenAddr string, vpnDNS []string, logger *slog.Logger, routeAdd
 		c = &lruCache{cache.NewCache[cacheKey, *dns.Msg]().WithMaxKeys(cacheSize).WithLRU()}
 	}
 
+	if routeAdder == nil {
+		routeAdder = func(ip net.IP) error {
+			return nil
+		}
+	}
+
 	return &Server{
 		listenAddr: listenAddr,
 		vpnDNS:     vpnDNS,
@@ -83,8 +89,11 @@ func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns
 
 	ck := cacheKey{name: qname, qtype: qtype}
 	if cached, ok := s.cache.Get(ck); ok {
-		s.logger.Debug("dns cache hit", "name", name, "type", reqType)
 		resp := cached.Copy()
+		if s.logger.Enabled(ctx, slog.LevelDebug) {
+			ips := toIPs(resp.Answer)
+			s.logger.Debug("dns cache hit", "name", name, "type", reqType, "ips", ips)
+		}
 		resp.ID = r.ID
 		resp.Data = nil
 		resp.WriteTo(w)
@@ -103,20 +112,35 @@ func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns
 		return
 	}
 
+	if s.logger.Enabled(ctx, slog.LevelDebug) {
+		ips := toIPs(resp.Answer)
+		s.logger.Debug("dns response", "name", name, "type", reqType, "ips", ips)
+	}
+
 	// Cache the response using the minimum TTL from the answer
 	if ttl := minTTL(resp); ttl > 0 {
 		s.cache.Set(ck, resp.Copy(), ttl)
-		s.logger.Debug("dns cache store", "name", name, "type", reqType, "ttl", ttl)
 	}
 
 	// Add routes for resolved IPs
-	if s.routeAdder != nil {
-		s.addRoutesFromResponse(resp, name)
-	}
+	s.addRoutesFromResponse(resp, name)
 
 	resp.ID = origID
 	resp.Data = nil
 	resp.WriteTo(w)
+}
+
+func toIPs(rrs []dns.RR) []net.IP {
+	var ips []net.IP
+	for _, rr := range rrs {
+		switch v := rr.(type) {
+		case *dns.A:
+			ips = append(ips, v.Addr.AsSlice())
+		case *dns.AAAA:
+			ips = append(ips, v.Addr.AsSlice())
+		}
+	}
+	return ips
 }
 
 func (s *Server) addRoutesFromResponse(resp *dns.Msg, name string) {
