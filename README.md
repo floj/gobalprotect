@@ -39,7 +39,7 @@ sudo gobalprotect connect -s vpn.example.com
 Or provide everything up front:
 
 ```bash
-sudo  gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
+sudo gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
 ```
 
 ## Usage
