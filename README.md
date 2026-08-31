@@ -24,7 +24,7 @@ Requires Go 1.24+ and Linux.
 ./build.sh
 ```
 
-This compiles the binary, injects the version from git tags, and sets the `cap_net_admin` capability (requires sudo for `setcap`).
+This compiles the binary.
 
 The resulting `gobalprotect` binary is placed in the project root.
 
@@ -33,13 +33,13 @@ The resulting `gobalprotect` binary is placed in the project root.
 Connect to a gateway interactively (you'll be prompted for credentials):
 
 ```bash
-gobalprotect connect -s vpn.example.com
+sudo gobalprotect connect -s vpn.example.com
 ```
 
 Or provide everything up front:
 
 ```bash
-gobalprotect connect -s vpn.example.com -u jdoe --password-cmd "pass show vpn/work"
+sudo  gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
 ```
 
 ## Usage
