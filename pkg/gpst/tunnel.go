@@ -28,15 +28,30 @@ type Tunnel struct {
 	client *Client
 	cookie *AuthCookie
 	config *VPNConfig
-	conn   net.Conn
 	logger *slog.Logger
 
 	Stats        TunnelStats
 	DisableStats bool
 
+	// ReadTimeout bounds how long a tunnel read may block without receiving
+	// any data (including keepalive replies) before the connection is
+	// considered dead. Must be greater than the keepalive interval.
+	ReadTimeout time.Duration
+	// KeepaliveInterval is the DPD send interval.
+	KeepaliveInterval time.Duration
+	// MaxReconnectBackoff caps the backoff between reconnect attempts.
+	MaxReconnectBackoff time.Duration
+
 	mu     sync.Mutex
+	conn   net.Conn
 	closed bool
 }
+
+const (
+	defaultReadTimeout         = 30 * time.Second
+	defaultKeepaliveInterval   = 10 * time.Second
+	defaultMaxReconnectBackoff = 30 * time.Second
+)
 
 // NewTunnel creates a new tunnel instance.
 func NewTunnel(client *Client, cookie *AuthCookie, config *VPNConfig) *Tunnel {
@@ -119,27 +134,63 @@ func (t *Tunnel) Connect(ctx context.Context) error {
 	}
 
 	t.logger.Info("SSL tunnel established")
-	t.conn = conn
+	if !t.setConn(conn) {
+		conn.Close()
+		return fmt.Errorf("tunnel closed")
+	}
 	return nil
+}
+
+// setConn atomically installs a new tunnel connection, closing any previous one.
+// Returns false if the tunnel has already been closed by the caller.
+func (t *Tunnel) setConn(c net.Conn) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return false
+	}
+	if t.conn != nil {
+		t.conn.Close()
+	}
+	t.conn = c
+	return true
+}
+
+func (t *Tunnel) currentConn() net.Conn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn
 }
 
 // Read reads a packet from the tunnel.
 // Returns the ethertype and payload data.
 func (t *Tunnel) Read() (etherType uint16, payload []byte, err error) {
-	return ReadPacket(t.conn)
+	c := t.currentConn()
+	if c == nil {
+		return 0, nil, fmt.Errorf("tunnel not connected")
+	}
+	return ReadPacket(c)
 }
 
 // Write writes a packet to the tunnel.
 func (t *Tunnel) Write(payload []byte) error {
+	c := t.currentConn()
+	if c == nil {
+		return fmt.Errorf("tunnel not connected")
+	}
 	pkt := EncodePacket(payload)
-	_, err := t.conn.Write(pkt)
+	_, err := c.Write(pkt)
 	return err
 }
 
 // SendKeepalive sends a DPD/keepalive packet.
 func (t *Tunnel) SendKeepalive() error {
+	c := t.currentConn()
+	if c == nil {
+		return fmt.Errorf("tunnel not connected")
+	}
 	pkt := EncodeKeepalive()
-	_, err := t.conn.Write(pkt)
+	_, err := c.Write(pkt)
 	return err
 }
 
@@ -161,25 +212,116 @@ func (t *Tunnel) Close() error {
 
 // RunDataLoop runs the bidirectional data loop between the tunnel and a TUN device.
 // tunRead reads packets from the TUN device, tunWrite writes packets to it.
+// On network errors (e.g. WiFi drop) the tunnel is transparently re-dialed
+// using the existing auth cookie, with exponential backoff, until ctx is cancelled.
 func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error), tunWrite func([]byte) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 2)
+	readTimeout := t.ReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = defaultReadTimeout
+	}
+	keepalive := t.KeepaliveInterval
+	if keepalive <= 0 {
+		keepalive = defaultKeepaliveInterval
+	}
+	maxBackoff := t.MaxReconnectBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = defaultMaxReconnectBackoff
+	}
 
-	// Tunnel -> TUN (read from VPN, write to TUN)
+	// Single long-lived TUN reader: prevents two concurrent readers on the TUN
+	// fd across reconnects. Packets are dropped when the outbound buffer is
+	// full (e.g. during a reconnect window).
+	tunOut := make(chan []byte, 64)
+	tunReadErr := make(chan error, 1)
 	go func() {
-		errCh <- t.readLoop(ctx, tunWrite)
+		for {
+			data, err := tunRead()
+			if err != nil {
+				select {
+				case tunReadErr <- err:
+				default:
+				}
+				return
+			}
+			if len(data) == 0 {
+				continue
+			}
+			select {
+			case tunOut <- data:
+			case <-ctx.Done():
+				return
+			default:
+				t.logger.Debug("tun send buffer full, dropping packet", "len", len(data))
+			}
+		}
 	}()
 
-	// TUN -> Tunnel (read from TUN, write to VPN)
-	go func() {
-		errCh <- t.writeLoop(ctx, tunRead)
-	}()
+	backoff := time.Second
+	attempt := 0
 
-	// Keepalive and stats loop
+	var lastErr error
+	for {
+		conn := t.currentConn()
+		if conn == nil {
+			lastErr = fmt.Errorf("tunnel not connected")
+		} else {
+			lastErr = t.runSession(ctx, conn, tunOut, tunReadErr, tunWrite, readTimeout, keepalive)
+		}
+
+		if ctx.Err() != nil {
+			t.logger.Info("tunnel stats (final)",
+				"sent_bytes", t.Stats.BytesSent.Load(),
+				"recv_bytes", t.Stats.BytesReceived.Load(),
+				"sent_packets", t.Stats.PacketsSent.Load(),
+				"recv_packets", t.Stats.PacketsRecv.Load(),
+			)
+			return lastErr
+		}
+
+		attempt++
+		t.logger.Warn("tunnel disconnected, reconnecting",
+			"error", lastErr,
+			"attempt", attempt,
+			"backoff", backoff,
+		)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		if err := t.Connect(ctx); err != nil {
+			t.logger.Warn("tunnel reconnect failed", "error", err, "attempt", attempt)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		t.logger.Info("tunnel reconnected", "attempts", attempt)
+		attempt = 0
+		backoff = time.Second
+	}
+}
+
+// runSession runs one connected session over conn. Returns when either
+// direction fails or ctx is cancelled.
+func (t *Tunnel) runSession(ctx context.Context, conn net.Conn, tunOut <-chan []byte, tunReadErr <-chan error, tunWrite func([]byte) error, readTimeout, keepalive time.Duration) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 3)
+
+	go func() { errCh <- t.readLoop(ctx, conn, tunWrite, readTimeout) }()
+	go func() { errCh <- t.writeLoop(ctx, conn, tunOut) }()
+
 	go func() {
-		keepaliveTicker := time.NewTicker(10 * time.Second)
+		keepaliveTicker := time.NewTicker(keepalive)
 		defer keepaliveTicker.Stop()
 
 		statsTicker := time.NewTicker(1 * time.Minute)
@@ -190,8 +332,8 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 			case <-ctx.Done():
 				return
 			case <-keepaliveTicker.C:
-				if err := t.SendKeepalive(); err != nil {
-					t.logger.Warn("keepalive failed", "error", err)
+				if _, err := conn.Write(EncodeKeepalive()); err != nil {
+					errCh <- fmt.Errorf("keepalive write: %w", err)
 					return
 				}
 				t.logger.Debug("sent keepalive")
@@ -209,21 +351,22 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		}
 	}()
 
-	// Wait for first error
-	err := <-errCh
-	cancel()
-
-	t.logger.Info("tunnel stats (final)",
-		"sent_bytes", t.Stats.BytesSent.Load(),
-		"recv_bytes", t.Stats.BytesReceived.Load(),
-		"sent_packets", t.Stats.PacketsSent.Load(),
-		"recv_packets", t.Stats.PacketsRecv.Load(),
-	)
-
-	return err
+	select {
+	case err := <-errCh:
+		cancel()
+		conn.Close()
+		return err
+	case err := <-tunReadErr:
+		cancel()
+		conn.Close()
+		return fmt.Errorf("tun read failed: %w", err)
+	case <-ctx.Done():
+		conn.Close()
+		return ctx.Err()
+	}
 }
 
-func (t *Tunnel) readLoop(ctx context.Context, tunWrite func([]byte) error) error {
+func (t *Tunnel) readLoop(ctx context.Context, conn net.Conn, tunWrite func([]byte) error, readTimeout time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -231,7 +374,11 @@ func (t *Tunnel) readLoop(ctx context.Context, tunWrite func([]byte) error) erro
 		default:
 		}
 
-		etherType, payload, err := t.Read()
+		if readTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		}
+
+		etherType, payload, err := ReadPacket(conn)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -261,30 +408,20 @@ func (t *Tunnel) readLoop(ctx context.Context, tunWrite func([]byte) error) erro
 	}
 }
 
-func (t *Tunnel) writeLoop(ctx context.Context, tunRead func() ([]byte, error)) error {
+func (t *Tunnel) writeLoop(ctx context.Context, conn net.Conn, tunOut <-chan []byte) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-
-		data, err := tunRead()
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		case data := <-tunOut:
+			if len(data) == 0 {
+				continue
 			}
-			return fmt.Errorf("reading from TUN: %w", err)
-		}
-
-		if len(data) == 0 {
-			continue
-		}
-
-		t.Stats.BytesSent.Add(int64(len(data)))
-		t.Stats.PacketsSent.Add(1)
-		if err := t.Write(data); err != nil {
-			return fmt.Errorf("writing to tunnel: %w", err)
+			t.Stats.BytesSent.Add(int64(len(data)))
+			t.Stats.PacketsSent.Add(1)
+			if _, err := conn.Write(EncodePacket(data)); err != nil {
+				return fmt.Errorf("writing to tunnel: %w", err)
+			}
 		}
 	}
 }
