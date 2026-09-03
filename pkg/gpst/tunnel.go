@@ -3,6 +3,7 @@ package gpst
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// ErrAuthRejected indicates the gateway rejected the auth cookie when
+// (re)establishing the SSL tunnel. Callers should not retry with the same
+// cookie; a fresh Login() is required.
+var ErrAuthRejected = errors.New("gpst: auth cookie rejected by gateway")
 
 // TunnelStats holds traffic statistics for the tunnel.
 type TunnelStats struct {
@@ -130,6 +136,9 @@ func (t *Tunnel) Connect(ctx context.Context) error {
 	response := string(buf[:n])
 	if len(response) < 12 || response[:12] != "START_TUNNEL" {
 		conn.Close()
+		if isAuthRejection(response) {
+			return fmt.Errorf("%w: %s", ErrAuthRejected, firstLine(response))
+		}
 		return fmt.Errorf("unexpected tunnel response: %s", response)
 	}
 
@@ -295,6 +304,10 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		}
 
 		if err := t.Connect(ctx); err != nil {
+			if errors.Is(err, ErrAuthRejected) {
+				t.logger.Error("tunnel auth rejected, giving up", "error", err)
+				return err
+			}
 			t.logger.Warn("tunnel reconnect failed", "error", err, "attempt", attempt)
 			backoff *= 2
 			if backoff > maxBackoff {
@@ -432,4 +445,37 @@ func hostFromAddr(addr string) string {
 		return addr
 	}
 	return h
+}
+
+// isAuthRejection heuristically detects an auth-rejection reply from the
+// gateway to a GET-tunnel request. GlobalProtect gateways typically respond
+// with an HTTP 401/403 status line (or a body containing "authentication"/
+// "authcookie") when the auth cookie is invalid or expired.
+func isAuthRejection(response string) bool {
+	line := firstLine(response)
+	upper := strings.ToUpper(line)
+	if strings.HasPrefix(upper, "HTTP/") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			switch fields[1] {
+			case "401", "403":
+				return true
+			}
+		}
+	}
+	lowerBody := strings.ToLower(response)
+	if strings.Contains(lowerBody, "authentication") ||
+		strings.Contains(lowerBody, "authcookie") ||
+		strings.Contains(lowerBody, "unauthorized") ||
+		strings.Contains(lowerBody, "forbidden") {
+		return true
+	}
+	return false
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
