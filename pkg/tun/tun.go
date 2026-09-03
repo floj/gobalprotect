@@ -4,13 +4,23 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/godbus/dbus/v5"
 	"github.com/jsimonetti/rtnetlink"
 	"github.com/songgao/water"
 	"golang.org/x/sys/unix"
+)
+
+const (
+	resolve1Dest      = "org.freedesktop.resolve1"
+	resolve1Path      = "/org/freedesktop/resolve1"
+	resolve1Manager   = "org.freedesktop.resolve1.Manager"
+	resolve1SetDNSEx  = resolve1Manager + ".SetLinkDNSEx"
+	resolve1SetDomain = resolve1Manager + ".SetLinkDomains"
+	resolve1Revert    = resolve1Manager + ".RevertLink"
 )
 
 // Device represents a TUN network device.
@@ -282,55 +292,139 @@ func (d *Device) configure(cfg Config) error {
 
 	// Configure DNS via systemd-resolved (resolvectl) if available
 	if len(cfg.DNS) > 0 {
-		d.configureDNS(cfg.DNS, cfg.DNSDomains)
+		if err := d.configureDNS(cfg.DNS, cfg.DNSDomains); err != nil {
+			return fmt.Errorf("configuring DNS: %w", err)
+		}
 	}
 
 	return nil
 }
 
-func (d *Device) configureDNS(servers, domains []string) {
-	resolvectl, err := exec.LookPath("resolvectl")
+// dbusDNSAddressEx matches the systemd-resolved SetLinkDNSEx signature entry: (iayqs).
+// It carries a per-server port and SNI, so a DNS server on a non-standard port
+// (e.g. an unprivileged local resolver on 127.0.0.1:1553) can be advertised.
+type dbusDNSAddressEx struct {
+	Family  int32
+	Address []byte
+	Port    uint16
+	SNI     string
+}
+
+// dbusDNSDomain matches the systemd-resolved SetLinkDomains signature entry: (sb).
+type dbusDNSDomain struct {
+	Domain      string
+	RoutingOnly bool
+}
+
+// parseDNSServer accepts either a bare IP ("1.2.3.4", "::1") or a host:port
+// ("127.0.0.1:1553", "[::1]:1553"). Returns the parsed IP and port (0 if none).
+func parseDNSServer(s string) (net.IP, uint16, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, 0, fmt.Errorf("empty")
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return ip, 0, nil
+	}
+	host, portStr, err := net.SplitHostPort(s)
 	if err != nil {
-		d.logger.Warn("resolvectl not found; DNS not configured automatically", "dns", servers)
-		d.logger.Info("configure DNS manually", "servers", servers)
-		return
+		return nil, 0, fmt.Errorf("not an IP or host:port: %w", err)
 	}
-
-	// Set DNS servers for the interface
-	args := append([]string{"dns", d.name}, servers...)
-	if out, err := exec.Command(resolvectl, args...).CombinedOutput(); err != nil {
-		d.logger.Warn("resolvectl dns failed", "error", err, "output", strings.TrimSpace(string(out)))
-		return
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, 0, fmt.Errorf("invalid IP %q", host)
 	}
-	d.logger.Info("DNS servers configured via resolvectl", "iface", d.name, "servers", servers)
-
-	// Set DNS routing domains for the interface
-	if len(domains) > 0 {
-		// Prefix domains with ~ to make them routing domains (not search domains)
-		routing := make([]string, len(domains))
-		for i, dom := range domains {
-			dom = strings.TrimPrefix(dom, "*.")
-			if !strings.HasPrefix(dom, "~") {
-				dom = "~" + dom
-			}
-			routing[i] = dom
+	var port uint16
+	if portStr != "" {
+		p, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid port %q: %w", portStr, err)
 		}
-		args = append([]string{"domain", d.name}, routing...)
-		if out, err := exec.Command(resolvectl, args...).CombinedOutput(); err != nil {
-			d.logger.Warn("resolvectl domain failed", "error", err, "output", strings.TrimSpace(string(out)))
+		port = uint16(p)
+	}
+	return ip, port, nil
+}
+
+func (d *Device) configureDNS(servers, domains []string) error {
+	ifIndex, err := d.ifaceIndex()
+	if err != nil {
+		return fmt.Errorf("resolving interface index for DNS: %w", err)
+	}
+
+	conn, err := dbus.SystemBus()
+	if err != nil {
+		return fmt.Errorf("connecting to system D-Bus for DNS configuration: %w", err)
+	}
+
+	addrsEx := make([]dbusDNSAddressEx, 0, len(servers))
+	hasPort := false
+	for _, s := range servers {
+		ip, port, err := parseDNSServer(s)
+		if err != nil {
+			return fmt.Errorf("invalid DNS server %q: %w", s, err)
+		}
+		entry := dbusDNSAddressEx{Port: port}
+		if ip4 := ip.To4(); ip4 != nil {
+			entry.Family = unix.AF_INET
+			entry.Address = ip4
 		} else {
-			d.logger.Info("DNS domains configured via resolvectl", "iface", d.name, "domains", routing)
+			entry.Family = unix.AF_INET6
+			entry.Address = ip.To16()
+		}
+		if port != 0 {
+			hasPort = true
+		}
+		addrsEx = append(addrsEx, entry)
+	}
+
+	obj := conn.Object(resolve1Dest, dbus.ObjectPath(resolve1Path))
+
+	if len(addrsEx) > 0 {
+		if err := obj.Call(resolve1SetDNSEx, 0, int32(ifIndex), addrsEx).Store(); err != nil {
+			return fmt.Errorf("SetLinkDNSEx via D-Bus failed (systemd-resolved >= 247 required for per-server DNS port): %w", err)
+		}
+		if hasPort {
+			d.logger.Info("DNS servers configured via systemd-resolved D-Bus (with per-server port)", "iface", d.name, "servers", servers)
+		} else {
+			d.logger.Info("DNS servers configured via systemd-resolved D-Bus", "iface", d.name, "servers", servers)
 		}
 	}
+
+	if len(domains) > 0 {
+		routing := make([]dbusDNSDomain, 0, len(domains))
+		for _, dom := range domains {
+			dom = strings.TrimSpace(dom)
+			dom = strings.TrimPrefix(dom, "*.")
+			dom = strings.TrimPrefix(dom, "~")
+			if dom == "" {
+				continue
+			}
+			routing = append(routing, dbusDNSDomain{Domain: dom, RoutingOnly: true})
+		}
+		if len(routing) > 0 {
+			if err := obj.Call(resolve1SetDomain, 0, int32(ifIndex), routing).Store(); err != nil {
+				return fmt.Errorf("SetLinkDomains via D-Bus failed: %w", err)
+			}
+			d.logger.Info("DNS domains configured via systemd-resolved D-Bus", "iface", d.name, "domains", routing)
+		}
+	}
+	return nil
 }
 
 // RemoveDNS removes DNS configuration added by this device.
 func (d *Device) RemoveDNS() {
-	resolvectl, err := exec.LookPath("resolvectl")
+	ifIndex, err := d.ifaceIndex()
 	if err != nil {
 		return
 	}
-	exec.Command(resolvectl, "revert", d.name).Run()
+	conn, err := dbus.SystemBus()
+	if err != nil {
+		return
+	}
+	obj := conn.Object(resolve1Dest, dbus.ObjectPath(resolve1Path))
+	if err := obj.Call(resolve1Revert, 0, int32(ifIndex)).Store(); err != nil {
+		d.logger.Debug("RevertLink via D-Bus failed", "error", err)
+	}
 }
 
 // AddDefaultRoute adds a default route through the TUN device,
