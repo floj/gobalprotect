@@ -166,8 +166,28 @@ func connectCommand() *cli.Command {
 			}
 			logger := slog.New(handler)
 
-			ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
+
+			sigCh := make(chan os.Signal, 2)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			defer signal.Stop(sigCh)
+			go func() {
+				select {
+				case sig := <-sigCh:
+					logger.Info("received signal, shutting down gracefully (press Ctrl+C again to force quit)", "signal", sig)
+					cancel()
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case sig := <-sigCh:
+					logger.Warn("received second signal, forcing exit", "signal", sig)
+					os.Exit(130)
+				case <-ctx.Done():
+					return
+				}
+			}()
 
 			username := coalesce(cmd.String("username"), fileCfg.Username)
 			password := cmd.String("password")
