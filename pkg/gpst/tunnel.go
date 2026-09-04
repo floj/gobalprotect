@@ -48,6 +48,13 @@ type Tunnel struct {
 	// MaxReconnectBackoff caps the backoff between reconnect attempts.
 	MaxReconnectBackoff time.Duration
 
+	// Reauth is invoked when the gateway rejects the current auth cookie
+	// during a reconnect attempt. If set, it should perform a full login
+	// and return a fresh AuthCookie; the tunnel will then continue
+	// retrying with the new cookie. If nil, the tunnel gives up on auth
+	// rejection (previous behaviour).
+	Reauth func(ctx context.Context) (*AuthCookie, error)
+
 	mu     sync.Mutex
 	conn   net.Conn
 	closed bool
@@ -305,8 +312,20 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 
 		if err := t.Connect(ctx); err != nil {
 			if errors.Is(err, ErrAuthRejected) {
-				t.logger.Error("tunnel auth rejected, giving up", "error", err)
-				return err
+				if t.Reauth == nil {
+					t.logger.Error("tunnel auth rejected, giving up", "error", err)
+					return err
+				}
+				t.logger.Warn("tunnel auth rejected, re-authenticating", "error", err)
+				newCookie, reauthErr := t.Reauth(ctx)
+				if reauthErr != nil {
+					t.logger.Error("re-authentication failed, giving up", "error", reauthErr)
+					return fmt.Errorf("re-auth after %w: %v", ErrAuthRejected, reauthErr)
+				}
+				t.cookie = newCookie
+				t.logger.Info("re-authentication successful, retrying tunnel connect")
+				backoff = time.Second
+				continue
 			}
 			t.logger.Warn("tunnel reconnect failed", "error", err, "attempt", attempt)
 			backoff *= 2

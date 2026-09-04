@@ -56,6 +56,9 @@ properties:
         otp_cmd:
           type: string
           description: Shell command to execute to obtain OTP (stdout is used, 10s timeout).
+        totp_secret:
+          type: string
+          description: Base32-encoded TOTP secret; OTP codes are generated from it on demand. Combined with password/password_cmd, enables automatic re-authentication when the gateway rejects the cookie during reconnect.
         computer:
           type: string
           description: Computer name to report to the gateway.

@@ -121,6 +121,11 @@ func connectCommand() *cli.Command {
 				Sources: cli.EnvVars("GP_OTP_CMD"),
 			},
 			&cli.StringFlag{
+				Name:    "totp-secret",
+				Usage:   "Base32-encoded TOTP secret; OTP codes are generated from it on demand (also used during reconnect if --password is set)",
+				Sources: cli.EnvVars("GP_TOTP_SECRET"),
+			},
+			&cli.StringFlag{
 				Name:    "computer",
 				Usage:   "Computer name to report to the gateway (default: auto-detect)",
 				Sources: cli.EnvVars("GP_COMPUTER"),
@@ -217,6 +222,8 @@ func connectCommand() *cli.Command {
 				logger.Debug("obtained OTP from command", "cmd", otpCmd, "otp", otp)
 			}
 
+			totpSecret := coalesce(cmd.String("totp-secret"), fileCfg.TOTPSecret)
+
 			if cookieName == "" || cookieValue == "" {
 				if username == "" {
 					prompt := promptui.Prompt{
@@ -261,6 +268,7 @@ func connectCommand() *cli.Command {
 				noRoutes:       cmd.Bool("no-routes") || fileCfg.NoRoutes,
 				noDNS:          cmd.Bool("no-dns") || fileCfg.NoDNS,
 				otp:            otp,
+				totpSecret:     totpSecret,
 				computer:       coalesce(cmd.String("computer"), fileCfg.Computer),
 				noServeDNS:     cmd.Bool("no-serve-dns") || fileCfg.NoServeDNS,
 				serveDNSPort:   coalesceInt(cmd.Int("serve-dns-port"), fileCfg.ServeDNSPort),
@@ -282,6 +290,7 @@ type runConfig struct {
 	noRoutes       bool
 	noDNS          bool
 	otp            string
+	totpSecret     string
 	computer       string
 	noServeDNS     bool
 	serveDNSPort   int
@@ -307,6 +316,7 @@ type tunnelConfig struct {
 	NoRoutes       bool   `yaml:"no_routes"`
 	NoDNS          bool   `yaml:"no_dns"`
 	OTPCmd         string `yaml:"otp_cmd"`
+	TOTPSecret     string `yaml:"totp_secret"`
 	Computer       string `yaml:"computer"`
 	NoServeDNS     bool   `yaml:"no_serve_dns"`
 	ServeDNSPort   int    `yaml:"serve_dns_port"`
@@ -402,10 +412,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
-	if cfg.otp != "" {
+	switch {
+	case cfg.totpSecret != "":
+		client.InputCallback = totpInputCallback(logger, cfg.totpSecret)
+	case cfg.otp != "":
 		var otpUsed atomic.Bool
 		client.InputCallback = otpInputCallback(logger, cfg.otp, &otpUsed)
-	} else {
+	default:
 		client.InputCallback = interactiveInputCallback(ctx)
 	}
 
@@ -482,6 +495,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	// Establish SSL tunnel
 	tunnel := gpst.NewTunnel(client, cookie, vpnConfig)
+	if cfg.password != "" && cfg.totpSecret != "" {
+		tunnel.Reauth = func(ctx context.Context) (*gpst.AuthCookie, error) {
+			logger.Info("re-authenticating with saved password + TOTP secret")
+			return client.Login()
+		}
+	}
 	if err := tunnel.Connect(ctx); err != nil {
 		return fmt.Errorf("tunnel connect: %w", err)
 	}
@@ -544,6 +563,17 @@ func otpInputCallback(logger *slog.Logger, otp string, used *atomic.Bool) func(s
 		}
 		logger.Info("using OTP from command line", "prompt", prompt, "otp", otp)
 		return otp, nil
+	}
+}
+
+func totpInputCallback(logger *slog.Logger, secret string) func(string) (string, error) {
+	return func(prompt string) (string, error) {
+		code, err := gpst.GenerateTOTP(secret)
+		if err != nil {
+			return "", fmt.Errorf("generating TOTP: %w", err)
+		}
+		logger.Info("generated TOTP from secret", "prompt", prompt)
+		return code, nil
 	}
 }
 

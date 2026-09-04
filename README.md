@@ -8,7 +8,7 @@ Uses a userspace TUN device and the GlobalProtect SSL tunnel protocol (GPST) to 
 
 - **Split tunneling** — respects server-pushed split routes, or route all traffic via `--default-route`
 - **Split DNS** — local DNS proxy forwards queries for VPN domains, caches responses, and dynamically injects host routes
-- **MFA / OTP** — interactive prompt, `--otp` flag, or `--otp-cmd` for automation
+- **MFA / OTP** — interactive prompt, `--otp` flag, `--otp-cmd`, or `--totp-secret` (auto-generated codes, enables re-auth on reconnect)
 - **SAML** — pass pre-obtained cookies via `--cookie-name` / `--cookie-value`
 - **Config profiles** — YAML config file with multiple named profiles
 - **Password commands** — fetch credentials from a password manager via `--password-cmd`
@@ -60,6 +60,7 @@ gobalprotect connect [flags]
 | `--password-cmd` | | `GP_PASSWD_CMD` | Command to retrieve password (10s timeout) |
 | `--otp` | `-o` | `GP_OTP` | OTP code |
 | `--otp-cmd` | | `GP_OTP_CMD` | Command to retrieve OTP |
+| `--totp-secret` | | `GP_TOTP_SECRET` | Base32 TOTP secret; codes are generated on demand |
 | `--cookie-name` | | `GP_COOKIE_NAME` | SAML cookie field name |
 | `--cookie-value` | | `GP_COOKIE_VALUE` | SAML cookie value |
 | `--tun` | `-t` | `GP_TUN` | TUN device name |
@@ -129,6 +130,7 @@ All fields are optional except `name` and `server`:
 | `username` | Username |
 | `password_cmd` | Shell command to retrieve password |
 | `otp_cmd` | Shell command to retrieve OTP |
+| `totp_secret` | Base32 TOTP secret; codes are generated on demand |
 | `cookie_name` / `cookie_value` | SAML cookie credentials |
 | `insecure` | Skip TLS verification |
 | `tun` | TUN device name |
@@ -152,6 +154,14 @@ All fields are optional except `name` and `server`:
 gobalprotect connect -s vpn.example.com -u jdoe \
   --password-cmd "pass show vpn/work" \
   --otp-cmd "totp vpn-work"
+```
+
+Alternatively, pass the raw base32 TOTP secret with `--totp-secret` (or `GP_TOTP_SECRET`, or `totp_secret` in a config profile). The client then generates fresh codes as the gateway requests them. When combined with `--password` / `--password-cmd`, gobalprotect can also **automatically re-authenticate** if the gateway rejects the auth cookie during a reconnect (e.g. after the session lifetime expires), instead of exiting.
+
+```bash
+gobalprotect connect -s vpn.example.com -u jdoe \
+  --password-cmd "pass show vpn/work" \
+  --totp-secret "JBSWY3DPEHPK3PXP"
 ```
 
 **SAML** — obtain the SAML cookie externally and pass it in:
