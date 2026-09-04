@@ -17,7 +17,7 @@ import (
 )
 
 // ErrAuthRejected indicates the gateway rejected the auth cookie when
-// (re)establishing the SSL tunnel. Callers should not retry with the same
+// establishing the SSL tunnel. Callers should not retry with the same
 // cookie; a fresh Login() is required.
 var ErrAuthRejected = errors.New("gpst: auth cookie rejected by gateway")
 
@@ -45,25 +45,6 @@ type Tunnel struct {
 	ReadTimeout time.Duration
 	// KeepaliveInterval is the DPD send interval.
 	KeepaliveInterval time.Duration
-	// MaxReconnectBackoff caps the backoff between reconnect attempts.
-	MaxReconnectBackoff time.Duration
-
-	// Reauth is invoked when the gateway rejects the current auth cookie
-	// during a reconnect attempt. If set, it should perform a full login
-	// and return a fresh AuthCookie; the tunnel will then continue
-	// retrying with the new cookie. If nil, the tunnel gives up on auth
-	// rejection (previous behaviour).
-	Reauth func(ctx context.Context) (*AuthCookie, error)
-
-	// OnDisconnect is invoked exactly once each time an established
-	// session is lost, before any reconnect attempts begin. Callers can
-	// use this hook to tear down state that must be rebuilt after
-	// reconnect (e.g. routes, DNS caches).
-	OnDisconnect func()
-
-	// OnReconnect is invoked after a reconnect attempt succeeds. Callers
-	// can use this hook to rebuild state torn down in OnDisconnect.
-	OnReconnect func()
 
 	mu     sync.Mutex
 	conn   net.Conn
@@ -71,9 +52,8 @@ type Tunnel struct {
 }
 
 const (
-	defaultReadTimeout         = 30 * time.Second
-	defaultKeepaliveInterval   = 10 * time.Second
-	defaultMaxReconnectBackoff = 30 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	defaultKeepaliveInterval = 10 * time.Second
 )
 
 // NewTunnel creates a new tunnel instance.
@@ -236,10 +216,11 @@ func (t *Tunnel) Close() error {
 	return nil
 }
 
-// RunDataLoop runs the bidirectional data loop between the tunnel and a TUN device.
-// tunRead reads packets from the TUN device, tunWrite writes packets to it.
-// On network errors (e.g. WiFi drop) the tunnel is transparently re-dialed
-// using the existing auth cookie, with exponential backoff, until ctx is cancelled.
+// RunDataLoop runs the bidirectional data loop between the tunnel and a TUN device
+// for one session. tunRead reads packets from the TUN device, tunWrite writes
+// packets to it. It returns when the tunnel connection dies or ctx is cancelled;
+// callers are responsible for re-establishing the whole tunnel if they want to
+// reconnect.
 func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error), tunWrite func([]byte) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -252,14 +233,7 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 	if keepalive <= 0 {
 		keepalive = defaultKeepaliveInterval
 	}
-	maxBackoff := t.MaxReconnectBackoff
-	if maxBackoff <= 0 {
-		maxBackoff = defaultMaxReconnectBackoff
-	}
 
-	// Single long-lived TUN reader: prevents two concurrent readers on the TUN
-	// fd across reconnects. Packets are dropped when the outbound buffer is
-	// full (e.g. during a reconnect window).
 	tunOut := make(chan []byte, 64)
 	tunReadErr := make(chan error, 1)
 	go func() {
@@ -285,84 +259,20 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		}
 	}()
 
-	backoff := time.Second
-	attempt := 0
-	// disconnected tracks whether we already fired OnDisconnect for the
-	// current outage, so it only fires once per lost session.
-	disconnected := false
-
-	var lastErr error
-	for {
-		conn := t.currentConn()
-		if conn == nil {
-			lastErr = fmt.Errorf("tunnel not connected")
-		} else {
-			lastErr = t.runSession(ctx, conn, tunOut, tunReadErr, tunWrite, readTimeout, keepalive)
-		}
-
-		if ctx.Err() != nil {
-			t.logger.Info("tunnel stats (final)",
-				"sent_bytes", t.Stats.BytesSent.Load(),
-				"recv_bytes", t.Stats.BytesReceived.Load(),
-				"sent_packets", t.Stats.PacketsSent.Load(),
-				"recv_packets", t.Stats.PacketsRecv.Load(),
-			)
-			return lastErr
-		}
-
-		if !disconnected {
-			disconnected = true
-			if t.OnDisconnect != nil {
-				t.OnDisconnect()
-			}
-		}
-
-		attempt++
-		t.logger.Warn("tunnel disconnected, reconnecting",
-			"error", lastErr,
-			"attempt", attempt,
-			"backoff", backoff,
-		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		if err := t.Connect(ctx); err != nil {
-			if errors.Is(err, ErrAuthRejected) {
-				if t.Reauth == nil {
-					t.logger.Error("tunnel auth rejected, giving up", "error", err)
-					return err
-				}
-				t.logger.Warn("tunnel auth rejected, re-authenticating", "error", err)
-				newCookie, reauthErr := t.Reauth(ctx)
-				if reauthErr != nil {
-					t.logger.Error("re-authentication failed, giving up", "error", reauthErr)
-					return fmt.Errorf("re-auth after %w: %v", ErrAuthRejected, reauthErr)
-				}
-				t.cookie = newCookie
-				t.logger.Info("re-authentication successful, retrying tunnel connect")
-				backoff = time.Second
-				continue
-			}
-			t.logger.Warn("tunnel reconnect failed", "error", err, "attempt", attempt)
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-
-		t.logger.Info("tunnel reconnected", "attempts", attempt)
-		if t.OnReconnect != nil {
-			t.OnReconnect()
-		}
-		disconnected = false
-		attempt = 0
-		backoff = time.Second
+	conn := t.currentConn()
+	if conn == nil {
+		return fmt.Errorf("tunnel not connected")
 	}
+
+	err := t.runSession(ctx, conn, tunOut, tunReadErr, tunWrite, readTimeout, keepalive)
+
+	t.logger.Info("tunnel stats (final)",
+		"sent_bytes", t.Stats.BytesSent.Load(),
+		"recv_bytes", t.Stats.BytesReceived.Load(),
+		"sent_packets", t.Stats.PacketsSent.Load(),
+		"recv_packets", t.Stats.PacketsRecv.Load(),
+	)
+	return err
 }
 
 // runSession runs one connected session over conn. Returns when either

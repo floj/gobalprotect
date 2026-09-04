@@ -410,7 +410,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Create GP client
 	client := gpst.NewClient(cfg.server, cfg.username, cfg.password, cfg.computer, cfg.insecure, logger)
 	switch {
 	case cfg.totpSecret != "":
@@ -422,12 +421,63 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		client.InputCallback = interactiveInputCallback(ctx)
 	}
 
-	// Authenticate
+	canReconnect := cfg.password != "" && cfg.totpSecret != ""
+	hasCookieAuth := cfg.cookieName != "" && cfg.cookieValue != ""
+
+	const maxBackoff = 30 * time.Second
+	backoff := time.Second
+	first := true
+
+	for {
+		useCookie := first && hasCookieAuth
+		first = false
+
+		iterStart := time.Now()
+		err := runSession(ctx, logger, cfg, client, useCookie)
+		iterDuration := time.Since(iterStart)
+
+		if ctx.Err() != nil {
+			logger.Info("shutting down")
+			return nil
+		}
+
+		if !canReconnect {
+			logger.Error("session ended and reconnect not possible (need --password and --totp-secret); exiting", "error", err)
+			return err
+		}
+
+		if iterDuration > 30*time.Second {
+			backoff = time.Second
+		}
+
+		logger.Warn("session ended, re-establishing connection", "error", err, "backoff", backoff)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// runSession performs one full connection cycle: authenticate, fetch VPN
+// config, create the TUN device, connect the tunnel, start the split DNS
+// server and run the data loop until the tunnel dies or ctx is cancelled.
+// All resources are torn down before it returns.
+func runSession(ctx context.Context, logger *slog.Logger, cfg runConfig, client *gpst.Client, useCookieAuth bool) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	logger.Info("authenticating", "server", cfg.server, "user", cfg.username)
+
 	var cookie *gpst.AuthCookie
 	var err error
-
-	if cfg.cookieName != "" && cfg.cookieValue != "" {
+	if useCookieAuth {
 		cookie, err = client.LoginWithCookie(cfg.cookieName, cfg.cookieValue)
 	} else {
 		cookie, err = client.Login()
@@ -435,15 +485,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	if err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
-
 	logger.Info("authenticated successfully", "user", cookie.User, "portal", cookie.Portal)
+	defer func() {
+		if logoutErr := client.Logout(cookie); logoutErr != nil {
+			logger.Warn("logout failed", "error", logoutErr)
+		} else {
+			logger.Info("logged out successfully")
+		}
+	}()
 
-	// Get VPN configuration
 	vpnConfig, err := client.GetConfig(cookie)
 	if err != nil {
 		return fmt.Errorf("getting VPN config: %w", err)
 	}
-
 	logger.Info("VPN configuration received",
 		"ip", vpnConfig.IPAddress,
 		"netmask", vpnConfig.Netmask,
@@ -453,18 +507,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		"routes", vpnConfig.SplitIncludes,
 	)
 
-	// Create TUN device
 	tunCfg := tun.Config{
-		Name:    cfg.tunName,
-		Address: vpnConfig.IPAddress,
-		Netmask: vpnConfig.Netmask,
-		MTU:     vpnConfig.MTU,
+		Name:       cfg.tunName,
+		Address:    vpnConfig.IPAddress,
+		Netmask:    vpnConfig.Netmask,
+		MTU:        vpnConfig.MTU,
+		ExcludeIPs: resolveServerIPs(cfg.server, logger),
 	}
-
-	// Resolve VPN server IPs so we can exclude them from split routes
-	serverIPs := resolveServerIPs(cfg.server, logger)
-	tunCfg.ExcludeIPs = serverIPs
-
 	if !cfg.noRoutes {
 		tunCfg.Routes = vpnConfig.SplitIncludes
 	}
@@ -486,21 +535,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		tunDev.Close()
 	}()
 
-	// Set default route if requested
 	if cfg.asDefaultRoute && vpnConfig.Gateway != "" {
 		if err := tunDev.AddDefaultRoute(cfg.server); err != nil {
 			logger.Warn("failed to add default route", "error", err)
 		}
 	}
 
-	// Establish SSL tunnel
 	tunnel := gpst.NewTunnel(client, cookie, vpnConfig)
-	if cfg.password != "" && cfg.totpSecret != "" {
-		tunnel.Reauth = func(ctx context.Context) (*gpst.AuthCookie, error) {
-			logger.Info("re-authenticating with saved password + TOTP secret")
-			return client.Login()
-		}
-	}
 	if err := tunnel.Connect(ctx); err != nil {
 		return fmt.Errorf("tunnel connect: %w", err)
 	}
@@ -512,11 +553,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		"dns", strings.Join(vpnConfig.DNS, ", "),
 	)
 
-	// Start DNS server unless disabled
-	var dnsServer *splitdns.Server
 	if !cfg.noServeDNS {
 		serveDNSAddr := fmt.Sprintf("127.0.0.1:%d", cfg.serveDNSPort)
-		dnsServer, err = splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
+		dnsServer, err := splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}
@@ -531,43 +570,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 			}
 			logger.Info("DNS server stopped")
 		}()
-		defer dnsServer.Shutdown(ctx)
+		defer dnsServer.Shutdown(context.Background())
 		logger.Info("DNS server started", "addr", serveDNSAddr)
 	}
 
-	tunnel.OnDisconnect = func() {
-		logger.Info("clearing routes before reconnect")
-		tunDev.RemoveRoutes()
-		if dnsServer != nil {
-			dnsServer.FlushCache()
-		}
-	}
-	tunnel.OnReconnect = func() {
-		logger.Info("reapplying routes after reconnect")
-		tunDev.ReapplyRoutes()
-	}
-
-	go func() {
-		<-ctx.Done()
-		logger.Info("closing tunnel and shutting down gracefully")
-	}()
-
-	// Run the data loop
-	err = tunnel.RunDataLoop(ctx, tunDev.Read, tunDev.Write)
-	if err != nil && ctx.Err() != nil {
-		// Clean shutdown via signal
-		logger.Info("tunnel closed")
-
-		// Attempt logout
-		if logoutErr := client.Logout(cookie); logoutErr != nil {
-			logger.Warn("logout failed", "error", logoutErr)
-		} else {
-			logger.Info("logged out successfully")
-		}
-		return nil
-	}
-
-	return err
+	return tunnel.RunDataLoop(ctx, tunDev.Read, tunDev.Write)
 }
 
 func otpInputCallback(logger *slog.Logger, otp string, used *atomic.Bool) func(string) (string, error) {

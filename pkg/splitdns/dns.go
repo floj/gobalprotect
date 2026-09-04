@@ -71,14 +71,6 @@ func (s *Server) Shutdown(ctx context.Context) {
 	}
 }
 
-// FlushCache drops all cached DNS responses so subsequent queries
-// re-resolve upstream (and re-inject dynamic routes).
-func (s *Server) FlushCache() {
-	if s.cache != nil {
-		s.cache.Purge()
-	}
-}
-
 func (s *Server) handleRequest(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
 		return
