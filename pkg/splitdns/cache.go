@@ -11,6 +11,7 @@ import (
 type dnsCache interface {
 	Get(key cacheKey) (*dns.Msg, bool)
 	Set(key cacheKey, value *dns.Msg, ttl time.Duration)
+	Purge()
 }
 
 // noopCache is a dnsCache that never stores or returns anything.
@@ -18,6 +19,7 @@ type noopCache struct{}
 
 func (noopCache) Get(cacheKey) (*dns.Msg, bool)         { return nil, false }
 func (noopCache) Set(cacheKey, *dns.Msg, time.Duration) {}
+func (noopCache) Purge()                                {}
 
 // lruCache wraps expirable-cache to implement dnsCache.
 type lruCache struct {
@@ -28,6 +30,7 @@ func (l *lruCache) Get(key cacheKey) (*dns.Msg, bool) { return l.c.Get(key) }
 func (l *lruCache) Set(key cacheKey, value *dns.Msg, ttl time.Duration) {
 	l.c.Set(key, value, ttl)
 }
+func (l *lruCache) Purge() { l.c.Purge() }
 
 // cacheKey is the key for DNS cache entries.
 type cacheKey struct {

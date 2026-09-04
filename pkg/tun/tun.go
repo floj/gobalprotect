@@ -25,11 +25,12 @@ const (
 
 // Device represents a TUN network device.
 type Device struct {
-	iface       *water.Interface
-	name        string
-	logger      *slog.Logger
-	mu          sync.Mutex
-	addedRoutes []addedRoute
+	iface         *water.Interface
+	name          string
+	logger        *slog.Logger
+	mu            sync.Mutex
+	addedRoutes   []addedRoute
+	initialRoutes []string
 }
 
 // Config holds the TUN device configuration.
@@ -136,6 +137,37 @@ func (d *Device) RemoveRoutes() {
 			d.logger.Debug("removed route", "dst", r.dst, "prefix", r.prefixLen)
 		}
 	}
+	d.addedRoutes = nil
+}
+
+// ReapplyRoutes re-adds the split routes originally configured at
+// New() time. Dynamic routes added via AddRoute (e.g. from split DNS)
+// are not restored; they will be re-injected on subsequent DNS lookups.
+func (d *Device) ReapplyRoutes() {
+	d.mu.Lock()
+	routes := append([]string(nil), d.initialRoutes...)
+	d.mu.Unlock()
+
+	if len(routes) == 0 {
+		return
+	}
+
+	conn, err := rtnetlink.Dial(nil)
+	if err != nil {
+		d.logger.Warn("failed to dial rtnetlink for route reapply", "error", err)
+		return
+	}
+	defer conn.Close()
+
+	ifIndex, err := d.ifaceIndex()
+	if err != nil {
+		d.logger.Warn("failed to look up interface for route reapply", "error", err)
+		return
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyRoutesLocked(conn, ifIndex, routes)
 }
 
 // Close closes the TUN device.
@@ -247,48 +279,8 @@ func (d *Device) configure(cfg Config) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	for _, route := range cfg.Routes {
-		route = strings.TrimSpace(route)
-		if route == "" || route == "0.0.0.0/0" || route == "::/0" {
-			continue
-		}
-		var dst net.IP
-		var prefixLen uint8
-		var family uint8
-		_, cidr, err := net.ParseCIDR(route)
-		if err != nil {
-			ip := net.ParseIP(route)
-			if ip == nil {
-				d.logger.Warn("invalid route, skipping", "route", route, "error", err)
-				continue
-			}
-			if ip4 := ip.To4(); ip4 != nil {
-				dst = ip4
-				prefixLen = 32
-				family = unix.AF_INET
-			} else {
-				dst = ip.To16()
-				prefixLen = 128
-				family = unix.AF_INET6
-			}
-		} else {
-			ones, _ := cidr.Mask.Size()
-			prefixLen = uint8(ones)
-			if ip4 := cidr.IP.To4(); ip4 != nil {
-				dst = ip4
-				family = unix.AF_INET
-			} else {
-				dst = cidr.IP.To16()
-				family = unix.AF_INET6
-			}
-		}
-		if err := addRoute(conn, family, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
-			d.logger.Warn("failed to add route", "route", route, "error", err)
-		} else {
-			d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: dst, prefixLen: prefixLen})
-			d.logger.Info("added route", "route", route)
-		}
-	}
+	d.initialRoutes = append(d.initialRoutes, cfg.Routes...)
+	d.applyRoutesLocked(conn, ifIndex, cfg.Routes)
 
 	// Configure DNS via systemd-resolved (resolvectl) if available
 	if len(cfg.DNS) > 0 {
@@ -521,6 +513,53 @@ func (d *Device) AddRoute(ip net.IP) error {
 	d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: ip, prefixLen: prefixLen})
 	d.logger.Info("added dynamic route for DNS result", "ip", ip, "prefix", prefixLen)
 	return nil
+}
+
+// applyRoutesLocked parses each route (CIDR or bare IP) and installs it
+// through this device. d.mu must be held by the caller.
+func (d *Device) applyRoutesLocked(conn *rtnetlink.Conn, ifIndex uint32, routes []string) {
+	for _, route := range routes {
+		route = strings.TrimSpace(route)
+		if route == "" || route == "0.0.0.0/0" || route == "::/0" {
+			continue
+		}
+		var dst net.IP
+		var prefixLen uint8
+		var family uint8
+		_, cidr, err := net.ParseCIDR(route)
+		if err != nil {
+			ip := net.ParseIP(route)
+			if ip == nil {
+				d.logger.Warn("invalid route, skipping", "route", route, "error", err)
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				dst = ip4
+				prefixLen = 32
+				family = unix.AF_INET
+			} else {
+				dst = ip.To16()
+				prefixLen = 128
+				family = unix.AF_INET6
+			}
+		} else {
+			ones, _ := cidr.Mask.Size()
+			prefixLen = uint8(ones)
+			if ip4 := cidr.IP.To4(); ip4 != nil {
+				dst = ip4
+				family = unix.AF_INET
+			} else {
+				dst = cidr.IP.To16()
+				family = unix.AF_INET6
+			}
+		}
+		if err := addRoute(conn, family, prefixLen, unix.RT_SCOPE_LINK, rtnetlink.RouteAttributes{Dst: dst, OutIface: ifIndex}); err != nil {
+			d.logger.Warn("failed to add route", "route", route, "error", err)
+		} else {
+			d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: dst, prefixLen: prefixLen})
+			d.logger.Info("added route", "route", route)
+		}
+	}
 }
 
 // addRoute adds a route with the given destination prefix, scope, and attributes.

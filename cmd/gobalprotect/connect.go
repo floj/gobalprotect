@@ -513,9 +513,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 	)
 
 	// Start DNS server unless disabled
+	var dnsServer *splitdns.Server
 	if !cfg.noServeDNS {
 		serveDNSAddr := fmt.Sprintf("127.0.0.1:%d", cfg.serveDNSPort)
-		dnsServer, err := splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
+		dnsServer, err = splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}
@@ -533,6 +534,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 		defer dnsServer.Shutdown(ctx)
 		logger.Info("DNS server started", "addr", serveDNSAddr)
 	}
+
+	tunnel.OnDisconnect = func() {
+		logger.Info("clearing routes before reconnect")
+		tunDev.RemoveRoutes()
+		if dnsServer != nil {
+			dnsServer.FlushCache()
+		}
+	}
+	tunnel.OnReconnect = func() {
+		logger.Info("reapplying routes after reconnect")
+		tunDev.ReapplyRoutes()
+	}
+
 	go func() {
 		<-ctx.Done()
 		logger.Info("closing tunnel and shutting down gracefully")

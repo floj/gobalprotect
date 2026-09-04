@@ -55,6 +55,16 @@ type Tunnel struct {
 	// rejection (previous behaviour).
 	Reauth func(ctx context.Context) (*AuthCookie, error)
 
+	// OnDisconnect is invoked exactly once each time an established
+	// session is lost, before any reconnect attempts begin. Callers can
+	// use this hook to tear down state that must be rebuilt after
+	// reconnect (e.g. routes, DNS caches).
+	OnDisconnect func()
+
+	// OnReconnect is invoked after a reconnect attempt succeeds. Callers
+	// can use this hook to rebuild state torn down in OnDisconnect.
+	OnReconnect func()
+
 	mu     sync.Mutex
 	conn   net.Conn
 	closed bool
@@ -277,6 +287,9 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 
 	backoff := time.Second
 	attempt := 0
+	// disconnected tracks whether we already fired OnDisconnect for the
+	// current outage, so it only fires once per lost session.
+	disconnected := false
 
 	var lastErr error
 	for {
@@ -295,6 +308,13 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 				"recv_packets", t.Stats.PacketsRecv.Load(),
 			)
 			return lastErr
+		}
+
+		if !disconnected {
+			disconnected = true
+			if t.OnDisconnect != nil {
+				t.OnDisconnect()
+			}
 		}
 
 		attempt++
@@ -336,6 +356,10 @@ func (t *Tunnel) RunDataLoop(ctx context.Context, tunRead func() ([]byte, error)
 		}
 
 		t.logger.Info("tunnel reconnected", "attempts", attempt)
+		if t.OnReconnect != nil {
+			t.OnReconnect()
+		}
+		disconnected = false
 		attempt = 0
 		backoff = time.Second
 	}
