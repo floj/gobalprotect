@@ -16,19 +16,38 @@ Uses a userspace TUN device and the GlobalProtect SSL tunnel protocol (GPST) to 
 
 ## 📦 Installation
 
+### Download a release
+
+Prebuilt static binaries for Linux (`amd64`, `arm64`) are attached to each [GitHub release](https://github.com/floj/gobalprotect/releases).
+
+```bash
+VERSION=v0.1.0                                       # pick a release tag
+ARCH=$(uname -m); [ "$ARCH" = "aarch64" ] && ARCH=arm64
+curl -fsSL "https://github.com/floj/gobalprotect/releases/download/${VERSION}/gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz" \
+  | tar -xz gobalprotect
+sudo install -m 0755 gobalprotect /usr/local/bin/
+```
+
+Optionally verify the archive against `checksums.txt` from the same release:
+
+```bash
+curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/checksums.txt"
+sha256sum -c --ignore-missing checksums.txt
+```
+
 ### Build from source
 
-Requires Go 1.24+ and Linux.
+Requires Go 1.26+ and Linux.
 
 ```bash
 ./build.sh
 ```
 
-This compiles the binary.
-
 The resulting `gobalprotect` binary is placed in the project root.
 
 ## 🚀 Quick Start
+
+gobalprotect needs root (or `CAP_NET_ADMIN`) to create the TUN device and manage routes. DNS integration additionally requires `systemd-resolved`.
 
 Connect to a gateway interactively (you'll be prompted for credentials):
 
@@ -39,7 +58,7 @@ sudo gobalprotect connect -s vpn.example.com
 Or provide everything up front:
 
 ```bash
-sudo gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
+sudo -E gobalprotect connect -s vpn.example.com -u jdoe --password-cmd "pass show vpn/work"
 ```
 
 ## Usage
@@ -131,7 +150,7 @@ All fields are optional except `name` and `server`:
 | `password_cmd` | Shell command to retrieve password |
 | `otp_cmd` | Shell command to retrieve OTP |
 | `totp_secret` | Base32 TOTP secret; codes are generated on demand |
-| `cookie_name` / `cookie_value` | SAML cookie credentials |
+| `cookie_name` | SAML cookie field name (pair with `--cookie-value` / `GP_COOKIE_VALUE`) |
 | `insecure` | Skip TLS verification |
 | `tun` | TUN device name |
 | `as_default_route` | Route all traffic through VPN |
@@ -148,19 +167,19 @@ All fields are optional except `name` and `server`:
 
 **Password auth** — provide via `--password`, `--password-cmd`, env var, config file, or interactive prompt.
 
-**MFA/OTP** — if the server requires a second factor, gobalprotect will prompt interactively, or you can provide it via `--otp` / `--otp-cmd`:
+**MFA/OTP** — if the server requires a second factor, gobalprotect will prompt interactively, or you can provide it via `--otp` / `--otp-cmd` or `--totp-secret`:
 
 ```bash
 gobalprotect connect -s vpn.example.com -u jdoe \
-  --password-cmd "pass show vpn/work" \
-  --otp-cmd "totp vpn-work"
+  --password "$(pass show vpn/work)" \
+  --otp "$(totp vpn-work)"
 ```
 
-Alternatively, pass the raw base32 TOTP secret with `--totp-secret` (or `GP_TOTP_SECRET`, or `totp_secret` in a config profile). The client then generates fresh codes as the gateway requests them. When combined with `--password` / `--password-cmd`, gobalprotect can also **automatically re-authenticate** if the gateway rejects the auth cookie during a reconnect (e.g. after the session lifetime expires), instead of exiting.
+Alternatively, pass the raw base32 TOTP secret with `--totp-secret` (or `GP_TOTP_SECRET`, or `totp_secret` in a config profile). The client then generates fresh codes as the gateway requests them. When **both** `--password` / `--password-cmd` and `--totp-secret` are set, gobalprotect can also **automatically re-authenticate** if the gateway rejects the auth cookie during a reconnect (e.g. after the session lifetime expires), instead of exiting.
 
 ```bash
 gobalprotect connect -s vpn.example.com -u jdoe \
-  --password-cmd "pass show vpn/work" \
+  --password "$(pass show vpn/work)" \
   --totp-secret "JBSWY3DPEHPK3PXP"
 ```
 
