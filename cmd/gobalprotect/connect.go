@@ -430,7 +430,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 
 	for {
 		useCookie := first && hasCookieAuth
-		first = false
 
 		iterStart := time.Now()
 		err := runSession(ctx, logger, cfg, client, useCookie)
@@ -440,6 +439,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg runConfig) error {
 			logger.Info("shutting down")
 			return nil
 		}
+
+		// If the very first connection attempt failed, don't enter the
+		// reconnect loop: the failure is likely a config/permission problem
+		// that retrying won't fix.
+		if first && err != nil {
+			return err
+		}
+		first = false
 
 		if !canReconnect {
 			logger.Error("session ended and reconnect not possible (need --password and --totp-secret); exiting", "error", err)
