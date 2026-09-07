@@ -1,2 +1,3 @@
 /gobalprotect
 *.private.yaml
+/dist/
