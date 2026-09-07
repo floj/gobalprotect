@@ -14,6 +14,21 @@ Uses a userspace TUN device and the GlobalProtect SSL tunnel protocol (GPST) to 
 - **Password commands** — fetch credentials from a password manager via `--password-cmd`
 - **Statically compiled** — single binary, no CGO dependencies
 
+## ⚡ Quick Start
+
+Download the latest release into `~/.local/bin` and connect:
+
+```bash
+mkdir -p ~/.local/bin
+VERSION=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/floj/gobalprotect/releases/latest | sed 's#.*/##')
+ARCH=$(uname -m); [ "$ARCH" = "aarch64" ] && ARCH=arm64
+ARCHIVE="gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/${ARCHIVE}"
+tar -xzf "$ARCHIVE" -C ~/.local/bin gobalprotect
+
+sudo ~/.local/bin/gobalprotect connect -s vpn.example.com
+```
+
 ## 📦 Installation
 
 ### Download a release
@@ -23,16 +38,19 @@ Prebuilt static binaries for Linux (`amd64`, `arm64`) are attached to each [GitH
 ```bash
 VERSION=v0.1.0                                       # pick a release tag
 ARCH=$(uname -m); [ "$ARCH" = "aarch64" ] && ARCH=arm64
-curl -fsSL "https://github.com/floj/gobalprotect/releases/download/${VERSION}/gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz" \
-  | tar -xz gobalprotect
-sudo install -m 0755 gobalprotect /usr/local/bin/
-```
+ARCHIVE="gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/${ARCHIVE}"
+tar -xzf "$ARCHIVE" -C ~/.local/bin gobalprotect
 
-Optionally verify the archive against `checksums.txt` from the same release:
-
-```bash
+# Optionally verify the archive against checksums.txt from the same release:
 curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
+```
+
+Optionally install system-wide:
+
+```bash
+sudo install -m 0755 ~/.local/bin/gobalprotect /usr/local/bin/
 ```
 
 ### Build from source
@@ -45,9 +63,9 @@ Requires Go 1.26+ and Linux.
 
 The resulting `gobalprotect` binary is placed in the project root.
 
-## 🚀 Quick Start
+## 🚀 Usage examples
 
-gobalprotect needs root (or `CAP_NET_ADMIN`) to create the TUN device and manage routes. DNS integration additionally requires `systemd-resolved`.
+gobalprotect needs root (or `CAP_NET_ADMIN`) to create the TUN device and manage routes; DNS integration additionally requires `systemd-resolved`.
 
 Connect to a gateway interactively (you'll be prompted for credentials):
 
@@ -58,7 +76,7 @@ sudo gobalprotect connect -s vpn.example.com
 Or provide everything up front:
 
 ```bash
-sudo -E gobalprotect connect -s vpn.example.com -u jdoe --password-cmd "pass show vpn/work"
+sudo -E gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
 ```
 
 ## Usage
@@ -69,30 +87,30 @@ sudo -E gobalprotect connect -s vpn.example.com -u jdoe --password-cmd "pass sho
 gobalprotect connect [flags]
 ```
 
-| Flag | Alias | Env Var | Description |
-|---|---|---|---|
-| `--config` | `-c` | `GP_CONFIG` | Path to YAML config file |
-| `--profile` | `-p` | `GP_PROFILE` | Profile name from config |
-| `--server` | `-s` | `GP_SERVER` | Gateway address |
-| `--username` | `-u` | `GP_USER` | Username |
-| `--password` | | `GP_PASSWD` | Password |
-| `--password-cmd` | | `GP_PASSWD_CMD` | Command to retrieve password (10s timeout) |
-| `--otp` | `-o` | `GP_OTP` | OTP code |
-| `--otp-cmd` | | `GP_OTP_CMD` | Command to retrieve OTP |
-| `--totp-secret` | | `GP_TOTP_SECRET` | Base32 TOTP secret; codes are generated on demand |
-| `--cookie-name` | | `GP_COOKIE_NAME` | SAML cookie field name |
-| `--cookie-value` | | `GP_COOKIE_VALUE` | SAML cookie value |
-| `--tun` | `-t` | `GP_TUN` | TUN device name |
-| `--default-route` | | `GP_DEFAULT_ROUTE` | Route all traffic through VPN |
-| `--no-routes` | | `GP_NO_ROUTES` | Skip server-pushed split routes |
-| `--no-dns` | | `GP_NO_DNS` | Skip DNS configuration |
-| `--no-serve-dns` | | `GP_NO_SERVE_DNS` | Don't start local DNS proxy |
-| `--serve-dns-port` | | `GP_SERVE_DNS_PORT` | DNS proxy port (default: 1553) |
-| `--dns-cache-size` | | `GP_DNS_CACHE_SIZE` | DNS cache entries (default: 512, 0 to disable) |
-| `--computer` | | `GP_COMPUTER` | Computer name to report |
-| `--insecure` | `-k` | `GP_INSECURE` | Skip TLS certificate verification |
-| `--verbose` | `-v` | `GP_VERBOSE` | Debug logging |
-| `--log-json` | | `GP_LOG_JSON` | JSON log format |
+| Flag               | Alias | Env Var             | Description                                       |
+| ------------------ | ----- | ------------------- | ------------------------------------------------- |
+| `--config`         | `-c`  | `GP_CONFIG`         | Path to YAML config file                          |
+| `--profile`        | `-p`  | `GP_PROFILE`        | Profile name from config                          |
+| `--server`         | `-s`  | `GP_SERVER`         | Gateway address                                   |
+| `--username`       | `-u`  | `GP_USER`           | Username                                          |
+| `--password`       |       | `GP_PASSWD`         | Password                                          |
+| `--password-cmd`   |       | `GP_PASSWD_CMD`     | Command to retrieve password (10s timeout)        |
+| `--otp`            | `-o`  | `GP_OTP`            | OTP code                                          |
+| `--otp-cmd`        |       | `GP_OTP_CMD`        | Command to retrieve OTP                           |
+| `--totp-secret`    |       | `GP_TOTP_SECRET`    | Base32 TOTP secret; codes are generated on demand |
+| `--cookie-name`    |       | `GP_COOKIE_NAME`    | SAML cookie field name                            |
+| `--cookie-value`   |       | `GP_COOKIE_VALUE`   | SAML cookie value                                 |
+| `--tun`            | `-t`  | `GP_TUN`            | TUN device name                                   |
+| `--default-route`  |       | `GP_DEFAULT_ROUTE`  | Route all traffic through VPN                     |
+| `--no-routes`      |       | `GP_NO_ROUTES`      | Skip server-pushed split routes                   |
+| `--no-dns`         |       | `GP_NO_DNS`         | Skip DNS configuration                            |
+| `--no-serve-dns`   |       | `GP_NO_SERVE_DNS`   | Don't start local DNS proxy                       |
+| `--serve-dns-port` |       | `GP_SERVE_DNS_PORT` | DNS proxy port (default: 1553)                    |
+| `--dns-cache-size` |       | `GP_DNS_CACHE_SIZE` | DNS cache entries (default: 512, 0 to disable)    |
+| `--computer`       |       | `GP_COMPUTER`       | Computer name to report                           |
+| `--insecure`       | `-k`  | `GP_INSECURE`       | Skip TLS certificate verification                 |
+| `--verbose`        | `-v`  | `GP_VERBOSE`        | Debug logging                                     |
+| `--log-json`       |       | `GP_LOG_JSON`       | JSON log format                                   |
 
 All flags can also be set via environment variables.
 
@@ -142,26 +160,26 @@ Profile selection priority: `--profile` flag → `default_profile` field → aut
 
 All fields are optional except `name` and `server`:
 
-| Field | Description |
-|---|---|
-| `name` | Profile name (required) |
-| `server` | Gateway address (required) |
-| `username` | Username |
-| `password_cmd` | Shell command to retrieve password |
-| `otp_cmd` | Shell command to retrieve OTP |
-| `totp_secret` | Base32 TOTP secret; codes are generated on demand |
-| `cookie_name` | SAML cookie field name (pair with `--cookie-value` / `GP_COOKIE_VALUE`) |
-| `insecure` | Skip TLS verification |
-| `tun` | TUN device name |
-| `as_default_route` | Route all traffic through VPN |
-| `no_routes` | Skip server-pushed split routes |
-| `no_dns` | Skip DNS configuration |
-| `no_serve_dns` | Don't start local DNS proxy |
-| `serve_dns_port` | DNS proxy port (default: 1553) |
-| `dns_cache_size` | DNS cache entries (default: 512) |
-| `computer` | Computer name to report |
-| `verbose` | Debug logging |
-| `log_json` | JSON log format |
+| Field              | Description                                                             |
+| ------------------ | ----------------------------------------------------------------------- |
+| `name`             | Profile name (required)                                                 |
+| `server`           | Gateway address (required)                                              |
+| `username`         | Username                                                                |
+| `password_cmd`     | Shell command to retrieve password                                      |
+| `otp_cmd`          | Shell command to retrieve OTP                                           |
+| `totp_secret`      | Base32 TOTP secret; codes are generated on demand                       |
+| `cookie_name`      | SAML cookie field name (pair with `--cookie-value` / `GP_COOKIE_VALUE`) |
+| `insecure`         | Skip TLS verification                                                   |
+| `tun`              | TUN device name                                                         |
+| `as_default_route` | Route all traffic through VPN                                           |
+| `no_routes`        | Skip server-pushed split routes                                         |
+| `no_dns`           | Skip DNS configuration                                                  |
+| `no_serve_dns`     | Don't start local DNS proxy                                             |
+| `serve_dns_port`   | DNS proxy port (default: 1553)                                          |
+| `dns_cache_size`   | DNS cache entries (default: 512)                                        |
+| `computer`         | Computer name to report                                                 |
+| `verbose`          | Debug logging                                                           |
+| `log_json`         | JSON log format                                                         |
 
 ## 🔐 Authentication
 
