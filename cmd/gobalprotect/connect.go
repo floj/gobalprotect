@@ -562,7 +562,7 @@ func runSession(ctx context.Context, logger *slog.Logger, cfg runConfig, client 
 
 	if !cfg.noServeDNS {
 		serveDNSAddr := fmt.Sprintf("127.0.0.1:%d", cfg.serveDNSPort)
-		dnsServer, err := splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRoute, cfg.dnsCacheSize)
+		dnsServer, err := splitdns.NewServer(serveDNSAddr, vpnConfig.DNS, logger, tunDev.AddRouteWithDomain, cfg.dnsCacheSize)
 		if err != nil {
 			return fmt.Errorf("creating DNS server: %w", err)
 		}

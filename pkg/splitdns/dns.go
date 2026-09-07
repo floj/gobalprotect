@@ -14,7 +14,7 @@ import (
 
 // RouteAdder is called with resolved IPs from split-domain DNS queries
 // to dynamically add routes through the VPN tunnel.
-type RouteAdder func(ip net.IP) error
+type RouteAdder func(domain string, ip net.IP) error
 
 // Server is a DNS proxy that resolves all queries via VPN DNS servers.
 type Server struct {
@@ -38,7 +38,7 @@ func NewServer(listenAddr string, vpnDNS []string, logger *slog.Logger, routeAdd
 	}
 
 	if routeAdder == nil {
-		routeAdder = func(ip net.IP) error {
+		routeAdder = func(domain string, ip net.IP) error {
 			return nil
 		}
 	}
@@ -156,7 +156,7 @@ func (s *Server) addRoutesFromResponse(resp *dns.Msg, name string) {
 		default:
 			continue
 		}
-		if err := s.routeAdder(ip); err != nil {
+		if err := s.routeAdder(name, ip); err != nil {
 			s.logger.Warn("failed to add route for DNS result", "name", name, "ip", ip, "error", err)
 		}
 	}

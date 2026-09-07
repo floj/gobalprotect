@@ -477,7 +477,7 @@ func (d *Device) AddDefaultRoute(gatewayIP string) error {
 
 // AddRoute adds a host route for the given IP through the TUN device.
 // It is safe to call concurrently. If the route already exists, it is a no-op.
-func (d *Device) AddRoute(ip net.IP) error {
+func (d *Device) AddRouteWithDomain(domain string, ip net.IP) error {
 	var family uint8
 	var prefixLen uint8
 	if ip4 := ip.To4(); ip4 != nil {
@@ -520,7 +520,7 @@ func (d *Device) AddRoute(ip net.IP) error {
 	}
 
 	d.addedRoutes = append(d.addedRoutes, addedRoute{family: family, dst: ip, prefixLen: prefixLen})
-	d.logger.Info("added dynamic route for DNS result", "ip", ip, "prefix", prefixLen)
+	d.logger.Info("added dynamic route for DNS result", "domain", domain, "ip", ip, "prefix", prefixLen)
 	return nil
 }
 
