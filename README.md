@@ -191,7 +191,7 @@ gobalprotect connect -c config.yaml
 gobalprotect connect -c config.yaml -p lab
 ```
 
-Profile selection priority: `--profile` flag → `default_profile` field → automatic (if only one profile exists).
+Profile selection priority: `--profile` flag -> `default_profile` field -> automatic (if only one profile exists).
 
 ### Profile fields
 
@@ -255,7 +255,7 @@ By default, gobalprotect starts a local DNS proxy that:
 3. Caches responses (LRU with TTL-based expiry)
 4. Dynamically injects host routes for resolved IPs through the VPN tunnel
 
-DNS integration with `systemd-resolved` is configured automatically via D-Bus using routing domains. Per-server DNS ports require systemd-resolved ≥ 247.
+DNS integration with `systemd-resolved` is configured automatically via D-Bus using routing domains. Per-server DNS ports require systemd-resolved >= 247.
 
 Disable the local proxy with `--no-serve-dns`, or tune the cache with `--dns-cache-size` (0 disables caching).
 
@@ -265,13 +265,13 @@ Disable the local proxy with `--no-serve-dns`, or tune the cache with `--dns-cac
 
 **Force quit.** Press `Ctrl+C` a second time (or send another `SIGINT`/`SIGTERM`) to skip cleanup and exit immediately with code `130`. Use this only if graceful shutdown hangs - leftover state may need manual cleanup (`ip link del <tun>`, `resolvectl revert <tun>`).
 
-**Reconnect.** When the tunnel dies mid-session, gobalprotect automatically reconnects with exponential backoff (1s → 2s → 4s … capped at 30s). If the gateway rejects the auth cookie (e.g. session lifetime expired) and both `--password` / `--password-cmd` **and** `--totp-secret` are set, it re-authenticates from scratch; otherwise it exits. Failures on the *very first* connection attempt are not retried - they usually indicate a config or permission problem.
+**Reconnect.** When the tunnel dies mid-session, gobalprotect automatically reconnects with exponential backoff (1s -> 2s -> 4s … capped at 30s). If the gateway rejects the auth cookie (e.g. session lifetime expired) and both `--password` / `--password-cmd` **and** `--totp-secret` are set, it re-authenticates from scratch; otherwise it exits. Failures on the *very first* connection attempt are not retried - they usually indicate a config or permission problem.
 
 ## 🩺 Troubleshooting
 
 **`operation not permitted` when creating the TUN device.** You need `root` or `CAP_NET_ADMIN`. Either run under `sudo`, or grant the capability once: `sudo setcap cap_net_admin+ep /path/to/gobalprotect`.
 
-**`SetLinkDNSEx via D-Bus failed` / DNS not configured.** DNS integration requires `systemd-resolved` ≥ 247 (for per-server DNS port support). Verify with `resolvectl --version`. If systemd-resolved is unavailable, skip DNS configuration with `--no-dns` and manage `/etc/resolv.conf` yourself.
+**`SetLinkDNSEx via D-Bus failed` / DNS not configured.** DNS integration requires `systemd-resolved` >= 247 (for per-server DNS port support). Verify with `resolvectl --version`. If systemd-resolved is unavailable, skip DNS configuration with `--no-dns` and manage `/etc/resolv.conf` yourself.
 
 **TLS certificate errors.** Corporate gateways sometimes present certs signed by an internal CA. Install the CA into the system trust store, or bypass verification with `--insecure` (understand the trade-off).
 
