@@ -1,29 +1,60 @@
 # gobalprotect
 
-A Linux-native 🐧 GlobalProtect VPN client written in Go — an open-source alternative to the official Palo Alto client.
+[![Latest release](https://img.shields.io/github/v/release/floj/gobalprotect)](https://github.com/floj/gobalprotect/releases/latest)
+[![License](https://img.shields.io/github/license/floj/gobalprotect)](LICENSE)
+[![Go version](https://img.shields.io/github/go-mod/go-version/floj/gobalprotect)](go.mod)
+
+A Linux-native 🐧 GlobalProtect VPN client written in Go - an open-source alternative to the official Palo Alto client. The name is a portmanteau of **Go** and **GlobalProtect**.
 
 Uses a userspace TUN device and the GlobalProtect SSL tunnel protocol (GPST) to establish VPN connections, with built-in split DNS proxy and route management.
 
+## Contents
+
+- [Features](#-features)
+- [Requirements](#-requirements)
+- [Quick Start](#-quick-start)
+- [Installation](#-installation)
+- [Usage](#-usage)
+- [Configuration file](#-configuration-file)
+- [Authentication](#-authentication)
+- [Split DNS](#-split-dns)
+- [Stopping and reconnect](#-stopping-and-reconnect)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
+
 ## ✨ Features
 
-- **Split tunneling** — respects server-pushed split routes, or route all traffic via `--default-route`
-- **Split DNS** — local DNS proxy forwards queries for VPN domains, caches responses, and dynamically injects host routes
-- **MFA / OTP** — interactive prompt, `--otp` flag, `--otp-cmd`, or `--totp-secret` (auto-generated codes, enables re-auth on reconnect)
-- **SAML** — pass pre-obtained cookies via `--cookie-name` / `--cookie-value`
-- **Config profiles** — YAML config file with multiple named profiles
-- **Password commands** — fetch credentials from a password manager via `--password-cmd`
-- **Statically compiled** — single binary, no CGO dependencies
+- **Split tunneling** - respects server-pushed split routes, or route all traffic via `--default-route`
+- **Split DNS** - local DNS proxy forwards queries for VPN domains, caches responses, and dynamically injects host routes
+- **MFA / OTP** - interactive prompt, `--otp` flag, `--otp-cmd`, or `--totp-secret` (auto-generated codes, enables re-auth on reconnect)
+- **SAML** - pass pre-obtained cookies via `--cookie-name` / `--cookie-value`
+- **Config profiles** - YAML config file with multiple named profiles
+- **Password commands** - fetch credentials from a password manager via `--password-cmd`
+- **Statically compiled** - single binary, no CGO dependencies
+
+## 📋 Requirements
+
+- Linux with TUN kernel support (`/dev/net/tun`)
+- `root` or the `CAP_NET_ADMIN` capability (to create the TUN device and manage routes)
+- `systemd-resolved` >= 247 - only if DNS integration is used (skip with `--no-dns`)
+- Prebuilt static binaries ship for `amd64` and `arm64`
 
 ## ⚡ Quick Start
 
-Download the latest release into `~/.local/bin` and connect:
+Download the latest release into `~/.local/bin`, verify checksums, and connect:
 
 ```bash
 mkdir -p ~/.local/bin
 VERSION=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/floj/gobalprotect/releases/latest | sed 's#.*/##')
 ARCH=$(uname -m); [ "$ARCH" = "aarch64" ] && ARCH=arm64
 ARCHIVE="gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz"
-curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/${ARCHIVE}"
+BASE="https://github.com/floj/gobalprotect/releases/download/${VERSION}"
+
+curl -fsSLO "${BASE}/${ARCHIVE}"
+curl -fsSLO "${BASE}/checksums.txt"
+sha256sum -c --ignore-missing checksums.txt
+
 tar -xzf "$ARCHIVE" -C ~/.local/bin gobalprotect
 
 sudo ~/.local/bin/gobalprotect connect -s vpn.example.com
@@ -36,15 +67,18 @@ sudo ~/.local/bin/gobalprotect connect -s vpn.example.com
 Prebuilt static binaries for Linux (`amd64`, `arm64`) are attached to each [GitHub release](https://github.com/floj/gobalprotect/releases).
 
 ```bash
-VERSION=v0.1.0                                       # pick a release tag
+# Pin to a specific release tag for reproducibility, or resolve `latest` as
+# shown in Quick Start.
+VERSION=v0.1.0
 ARCH=$(uname -m); [ "$ARCH" = "aarch64" ] && ARCH=arm64
 ARCHIVE="gobalprotect_${VERSION#v}_linux_${ARCH}.tar.gz"
-curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/${ARCHIVE}"
-tar -xzf "$ARCHIVE" -C ~/.local/bin gobalprotect
+BASE="https://github.com/floj/gobalprotect/releases/download/${VERSION}"
 
-# Optionally verify the archive against checksums.txt from the same release:
-curl -fsSLO "https://github.com/floj/gobalprotect/releases/download/${VERSION}/checksums.txt"
+curl -fsSLO "${BASE}/${ARCHIVE}"
+curl -fsSLO "${BASE}/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
+
+tar -xzf "$ARCHIVE" -C ~/.local/bin gobalprotect
 ```
 
 Optionally install system-wide:
@@ -63,9 +97,11 @@ Requires Go 1.26+ and Linux.
 
 The resulting `gobalprotect` binary is placed in the project root.
 
-## 🚀 Usage examples
+## 🚀 Usage
 
-gobalprotect needs root (or `CAP_NET_ADMIN`) to create the TUN device and manage routes; DNS integration additionally requires `systemd-resolved`.
+See [Requirements](#-requirements) - you need root / `CAP_NET_ADMIN` and (for DNS) `systemd-resolved`.
+
+### Examples
 
 Connect to a gateway interactively (you'll be prompted for credentials):
 
@@ -79,7 +115,7 @@ Or provide everything up front:
 sudo -E gobalprotect connect -s vpn.example.com -u jdoe --password "$(pass show vpn/work)"
 ```
 
-## Usage
+> **Note:** use `sudo -E` (or `sudo --preserve-env`) whenever you rely on `GP_*` environment variables - plain `sudo` sanitizes them out and gobalprotect will fall back to interactive prompts.
 
 ### Connect
 
@@ -96,7 +132,7 @@ gobalprotect connect [flags]
 | `--password`       |       | `GP_PASSWD`         | Password                                          |
 | `--password-cmd`   |       | `GP_PASSWD_CMD`     | Command to retrieve password (10s timeout)        |
 | `--otp`            | `-o`  | `GP_OTP`            | OTP code                                          |
-| `--otp-cmd`        |       | `GP_OTP_CMD`        | Command to retrieve OTP                           |
+| `--otp-cmd`        |       | `GP_OTP_CMD`        | Command to retrieve OTP (10s timeout)             |
 | `--totp-secret`    |       | `GP_TOTP_SECRET`    | Base32 TOTP secret; codes are generated on demand |
 | `--cookie-name`    |       | `GP_COOKIE_NAME`    | SAML cookie field name                            |
 | `--cookie-value`   |       | `GP_COOKIE_VALUE`   | SAML cookie value                                 |
@@ -107,7 +143,7 @@ gobalprotect connect [flags]
 | `--no-serve-dns`   |       | `GP_NO_SERVE_DNS`   | Don't start local DNS proxy                       |
 | `--serve-dns-port` |       | `GP_SERVE_DNS_PORT` | DNS proxy port (default: 1553)                    |
 | `--dns-cache-size` |       | `GP_DNS_CACHE_SIZE` | DNS cache entries (default: 512, 0 to disable)    |
-| `--computer`       |       | `GP_COMPUTER`       | Computer name to report                           |
+| `--computer`       |       | `GP_COMPUTER`       | Computer name to report (default: hostname)       |
 | `--insecure`       | `-k`  | `GP_INSECURE`       | Skip TLS certificate verification                 |
 | `--verbose`        | `-v`  | `GP_VERBOSE`        | Debug logging                                     |
 | `--log-json`       |       | `GP_LOG_JSON`       | JSON log format                                   |
@@ -115,6 +151,8 @@ gobalprotect connect [flags]
 All flags can also be set via environment variables.
 
 If no credentials are provided, you'll be prompted interactively.
+
+There is **no default config file path** - `--config` (or `GP_CONFIG`) must always be provided explicitly.
 
 ### Version
 
@@ -137,7 +175,6 @@ profiles:
     password_cmd: "pass show vpn/work"
     otp_cmd: "totp vpn-work"
     tun: gpd0
-    dns_cache_size: 256
 
   - name: lab
     server: lab-vpn.example.com
@@ -165,10 +202,10 @@ All fields are optional except `name` and `server`:
 | `name`             | Profile name (required)                                                 |
 | `server`           | Gateway address (required)                                              |
 | `username`         | Username                                                                |
-| `password_cmd`     | Shell command to retrieve password                                      |
-| `otp_cmd`          | Shell command to retrieve OTP                                           |
+| `password_cmd`     | Shell command to retrieve password (10s timeout)                        |
+| `otp_cmd`          | Shell command to retrieve OTP (10s timeout)                             |
 | `totp_secret`      | Base32 TOTP secret; codes are generated on demand                       |
-| `cookie_name`      | SAML cookie field name (pair with `--cookie-value` / `GP_COOKIE_VALUE`) |
+| `cookie_name`      | SAML cookie field name. The value itself is CLI-/env-only (`--cookie-value` / `GP_COOKIE_VALUE`) and is intentionally never stored in the config file |
 | `insecure`         | Skip TLS verification                                                   |
 | `tun`              | TUN device name                                                         |
 | `as_default_route` | Route all traffic through VPN                                           |
@@ -177,15 +214,15 @@ All fields are optional except `name` and `server`:
 | `no_serve_dns`     | Don't start local DNS proxy                                             |
 | `serve_dns_port`   | DNS proxy port (default: 1553)                                          |
 | `dns_cache_size`   | DNS cache entries (default: 512)                                        |
-| `computer`         | Computer name to report                                                 |
+| `computer`         | Computer name to report (default: hostname)                             |
 | `verbose`          | Debug logging                                                           |
 | `log_json`         | JSON log format                                                         |
 
 ## 🔐 Authentication
 
-**Password auth** — provide via `--password`, `--password-cmd`, env var, config file, or interactive prompt.
+**Password auth** - provide via `--password`, `--password-cmd`, env var, config file, or interactive prompt.
 
-**MFA/OTP** — if the server requires a second factor, gobalprotect will prompt interactively, or you can provide it via `--otp` / `--otp-cmd` or `--totp-secret`:
+**MFA/OTP** - if the server requires a second factor, gobalprotect will prompt interactively, or you can provide it via `--otp` / `--otp-cmd` or `--totp-secret`:
 
 ```bash
 gobalprotect connect -s vpn.example.com -u jdoe \
@@ -201,7 +238,7 @@ gobalprotect connect -s vpn.example.com -u jdoe \
   --totp-secret "JBSWY3DPEHPK3PXP"
 ```
 
-**SAML** — obtain the SAML cookie externally and pass it in:
+**SAML** - obtain the SAML cookie externally and pass it in:
 
 ```bash
 gobalprotect connect -s vpn.example.com \
@@ -214,17 +251,39 @@ gobalprotect connect -s vpn.example.com \
 By default, gobalprotect starts a local DNS proxy that:
 
 1. Listens on UDP port 1553
-2. Forwards DNS queries for VPN domains to the VPN's DNS servers
+2. Forwards DNS queries for the *split-tunneling domains* pushed by the gateway (the `include-split-tunneling-domain` list) to the VPN's DNS servers
 3. Caches responses (LRU with TTL-based expiry)
 4. Dynamically injects host routes for resolved IPs through the VPN tunnel
 
-DNS integration with `systemd-resolved` is configured automatically using routing domains.
+DNS integration with `systemd-resolved` is configured automatically via D-Bus using routing domains. Per-server DNS ports require systemd-resolved ≥ 247.
 
-Disable with `--no-serve-dns` or tune the cache with `--dns-cache-size`.
+Disable the local proxy with `--no-serve-dns`, or tune the cache with `--dns-cache-size` (0 disables caching).
 
-## Stopping
+## 🛑 Stopping and reconnect
 
-Press `Ctrl+C` or send `SIGTERM`. gobalprotect will cleanly tear down the tunnel, remove routes, revert DNS configuration, and log out from the gateway.
+**Graceful shutdown.** Press `Ctrl+C` or send `SIGTERM`. gobalprotect will cleanly tear down the tunnel, remove routes, revert DNS configuration, and log out from the gateway.
+
+**Force quit.** Press `Ctrl+C` a second time (or send another `SIGINT`/`SIGTERM`) to skip cleanup and exit immediately with code `130`. Use this only if graceful shutdown hangs - leftover state may need manual cleanup (`ip link del <tun>`, `resolvectl revert <tun>`).
+
+**Reconnect.** When the tunnel dies mid-session, gobalprotect automatically reconnects with exponential backoff (1s → 2s → 4s … capped at 30s). If the gateway rejects the auth cookie (e.g. session lifetime expired) and both `--password` / `--password-cmd` **and** `--totp-secret` are set, it re-authenticates from scratch; otherwise it exits. Failures on the *very first* connection attempt are not retried - they usually indicate a config or permission problem.
+
+## 🩺 Troubleshooting
+
+**`operation not permitted` when creating the TUN device.** You need `root` or `CAP_NET_ADMIN`. Either run under `sudo`, or grant the capability once: `sudo setcap cap_net_admin+ep /path/to/gobalprotect`.
+
+**`SetLinkDNSEx via D-Bus failed` / DNS not configured.** DNS integration requires `systemd-resolved` ≥ 247 (for per-server DNS port support). Verify with `resolvectl --version`. If systemd-resolved is unavailable, skip DNS configuration with `--no-dns` and manage `/etc/resolv.conf` yourself.
+
+**TLS certificate errors.** Corporate gateways sometimes present certs signed by an internal CA. Install the CA into the system trust store, or bypass verification with `--insecure` (understand the trade-off).
+
+**Stuck on OTP prompt after reconnect.** Static `--otp` values are single-use. For automated reconnects, use `--totp-secret` so codes are generated on demand.
+
+**Environment variables ignored under `sudo`.** Plain `sudo` sanitizes the environment. Use `sudo -E` (or `sudo --preserve-env=GP_SERVER,GP_USER,...`) to pass `GP_*` variables through.
+
+**Split routes not applied.** Check the log output at startup - the gateway must push access routes in `access-routes`. Use `--verbose` to see the parsed VPN config. `--default-route` overrides split routing entirely.
+
+## 🤝 Contributing
+
+Bug reports and pull requests are welcome at <https://github.com/floj/gobalprotect/issues>. Please include the `--verbose` log output (redacted) when filing connection-related issues.
 
 ## 📄 License
 
