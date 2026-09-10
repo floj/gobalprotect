@@ -73,7 +73,7 @@ properties:
         dns_cache_size:
           type: integer
           description: Maximum number of cached DNS responses (0 to disable, default 256).
-          default: 256
+          default: 512
       required:
         - name
         - server
